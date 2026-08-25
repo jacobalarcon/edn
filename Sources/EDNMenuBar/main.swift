@@ -4,7 +4,7 @@ import Foundation
 import OSLog
 import ServiceManagement
 
-private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, WorkspaceManagerHost {
+private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, WorkspaceManagerHost, FocusSettingsHost {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let workspaceIndicator = WorkspaceIndicatorView()
     private let logger = Logger(subsystem: "com.jacobalarcon.edn", category: "lifecycle")
@@ -22,6 +22,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     /// Access only from switchQueue.
     private var launchesHandledBySwitch: [String: Date] = [:]
     private var manager: WorkspaceManagerWindowController?
+    private var focusSettings: FocusSettingsWindowController?
     private var cachedInstalledApplications: [InstalledApplication]?
     private var lastSwitchIssues: [(workspace: String, bundleId: String, issue: SwitchIssue)] = []
     private lazy var switchCoordinator = WorkspaceSwitchCoordinator(queue: switchQueue) { [weak self] name in
@@ -146,6 +147,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
         addItem("New Workspace…", action: #selector(newWorkspace), to: menu)
         addItem("Manage Workspaces…", action: #selector(manageWorkspaces), to: menu)
+        addItem("Keyboard Shortcuts…", action: #selector(openKeyboardShortcuts), to: menu)
         menu.addItem(.separator())
 
         // Only reachable route to granting the permission everything else depends on,
@@ -237,6 +239,26 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         switchCoordinator.request(name)
     }
 
+    private func performFocus(_ direction: FocusDirection, target: FocusTarget) {
+        switchQueue.async { [weak self] in
+            guard let self else { return }
+            do {
+                let controller = WorkspaceFocusController()
+                let result = target == .app
+                    ? try controller.focus(direction)
+                    : try controller.focusWindow(direction)
+                logger.debug("Focused \(result.target.rawValue, privacy: .public) for \(result.bundleId, privacy: .public) in \(result.workspace, privacy: .public)")
+            } catch WorkspaceFocusError.noActiveWorkspace,
+                    WorkspaceFocusError.noRunningApplications,
+                    WorkspaceFocusError.noFocusableWindows {
+                // Focus on an empty context is deliberately a quiet no-op.
+                logger.debug("Focus \(direction.rawValue, privacy: .public) had no eligible app")
+            } catch {
+                logger.error("Focus \(direction.rawValue, privacy: .public) failed: \(String(describing: error), privacy: .public)")
+            }
+        }
+    }
+
     private func switchImmediately(to name: String) {
         do {
             let engine = WorkspaceEngine(config: try Config.load())
@@ -269,6 +291,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     @objc private func manageWorkspaces() {
         presentManager(beginningCreate: false)
+    }
+
+    @objc private func openKeyboardShortcuts() {
+        let controller = focusSettings ?? FocusSettingsWindowController(host: self)
+        focusSettings = controller
+        NSApp.activate(ignoringOtherApps: true)
+        controller.present()
     }
 
     @objc private func reviewWindowSet() {
@@ -389,6 +418,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
     }
 
+    // MARK: - FocusSettingsHost
+
+    func focusSettingsSetHotkeysSuspended(_ suspended: Bool) {
+        managerSetHotkeysSuspended(suspended)
+    }
+
+    func focusSettingsDidMutateConfiguration() {
+        managerDidMutateConfiguration()
+    }
+
     // MARK: - Support
 
     private func saveActiveWorkspaceForTerminationIfNeeded() {
@@ -405,14 +444,26 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private func reloadHotkeysIfNeeded(force: Bool = false) {
         guard !hotkeysSuspended else { return }
         guard let config = try? Config.load() else { return }
-        let signature = ([config.general.hotkeyPrefix] + config.workspaces.map {
+        let signature = ([
+            config.general.hotkeyPrefix,
+            config.general.focus.previousApp ?? "",
+            config.general.focus.nextApp ?? "",
+            config.general.focus.previousWindow ?? "",
+            config.general.focus.nextWindow ?? ""
+        ] + config.workspaces.map {
             "\($0.name):\($0.hotkey ?? "")"
         }).joined(separator: "|")
         guard force || signature != configSignature else { return }
 
         hotkeys = nil
-        let manager = HotkeyManager { [weak self] name in
-            self?.performSwitch(to: name)
+        let manager = HotkeyManager { [weak self] action in
+            switch action {
+            case .workspace(let name): self?.performSwitch(to: name)
+            case .focusPreviousApp: self?.performFocus(.previous, target: .app)
+            case .focusNextApp: self?.performFocus(.next, target: .app)
+            case .focusPreviousWindow: self?.performFocus(.previous, target: .window)
+            case .focusNextWindow: self?.performFocus(.next, target: .window)
+            }
         }
         for workspace in config.workspaces {
             guard let key = workspace.hotkey else { continue }
@@ -420,6 +471,38 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 workspace: workspace.name,
                 key: key,
                 modifierNames: config.general.modifierNames
+            )
+        }
+        if let raw = config.general.focus.previousApp,
+           let chord = HotkeyChord(rawValue: raw) {
+            manager.register(
+                action: .focusPreviousApp,
+                key: chord.key,
+                modifierNames: chord.modifierNames
+            )
+        }
+        if let raw = config.general.focus.nextApp,
+           let chord = HotkeyChord(rawValue: raw) {
+            manager.register(
+                action: .focusNextApp,
+                key: chord.key,
+                modifierNames: chord.modifierNames
+            )
+        }
+        if let raw = config.general.focus.previousWindow,
+           let chord = HotkeyChord(rawValue: raw) {
+            manager.register(
+                action: .focusPreviousWindow,
+                key: chord.key,
+                modifierNames: chord.modifierNames
+            )
+        }
+        if let raw = config.general.focus.nextWindow,
+           let chord = HotkeyChord(rawValue: raw) {
+            manager.register(
+                action: .focusNextWindow,
+                key: chord.key,
+                modifierNames: chord.modifierNames
             )
         }
         hotkeys = manager

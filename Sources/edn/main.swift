@@ -36,8 +36,18 @@ struct SaveResponse: Encodable {
 }
 struct MutationResponse: Encodable { let action: String; let workspace: String }
 struct DaemonHotkeyResponse: Encodable { let workspace: String; let shortcut: String }
-struct DaemonReadyResponse: Encodable { let event: String; let hotkeys: [DaemonHotkeyResponse] }
+struct DaemonFocusHotkeyResponse: Encodable {
+    let target: FocusTarget
+    let direction: FocusDirection
+    let shortcut: String
+}
+struct DaemonReadyResponse: Encodable {
+    let event: String
+    let hotkeys: [DaemonHotkeyResponse]
+    let focusHotkeys: [DaemonFocusHotkeyResponse]
+}
 struct DaemonSwitchResponse: Encodable { let event: String; let result: SwitchResponse }
+struct DaemonFocusResponse: Encodable { let event: String; let result: WorkspaceFocusResult }
 struct DaemonErrorResponse: Encodable { let event: String; let workspace: String?; let error: ErrorBody }
 
 func printUsage() {
@@ -57,6 +67,8 @@ func printUsage() {
       edn delete <name> --yes [--json]
                                   Delete a workspace from config and state
       edn status [--json]          Show Accessibility permission status
+      edn focus <next|previous> [--window] [--json]
+                                  Focus an app or live window in the active workspace
       edn daemon [--json]          Listen for hotkeys; --json emits an event stream
     """)
 }
@@ -135,6 +147,11 @@ func errorBody(_ error: Error, command: String?) -> ErrorBody {
     case WorkspaceAuthoringError.applicationUnavailable: code = "application_unavailable"
     case WorkspaceAuthoringError.duplicateApplicationProcess: code = "duplicate_application_process"
     case WorkspaceAuthoringError.ambiguousWindows: code = "ambiguous_windows"
+    case WorkspaceFocusError.noActiveWorkspace: code = "no_active_workspace"
+    case WorkspaceFocusError.workspaceNotFound: code = "workspace_not_found"
+    case WorkspaceFocusError.noRunningApplications: code = "no_running_applications"
+    case WorkspaceFocusError.noFocusableWindows: code = "no_focusable_windows"
+    case WorkspaceFocusError.focusFailed: code = "focus_failed"
     case is ConfigValidationError: code = "invalid_config"
     default: code = "command_failed"
     }
@@ -384,6 +401,21 @@ case "delete":
         else { print("Deleted workspace '\(name)' from config and state.") }
     } catch { fail(error, command: command, json: jsonRequested) }
 
+case "focus":
+    do {
+        guard let value = arguments.first, !value.hasPrefix("--"),
+              let direction = FocusDirection(rawValue: value.lowercased()) else {
+            throw CLIError.invalidValue("Usage: edn focus <next|previous> [--json]")
+        }
+        try validateOptions(in: arguments, afterPositionals: 1, flags: ["--window", "--json"])
+        let controller = WorkspaceFocusController()
+        let result = arguments.contains("--window")
+            ? try controller.focusWindow(direction)
+            : try controller.focus(direction)
+        if jsonRequested { try writeJSON(result) }
+        else { print("Focused \(result.bundleId) in workspace '\(result.workspace)'.") }
+    } catch { fail(error, command: command, json: jsonRequested) }
+
 case "daemon":
     do {
         try validateOptions(in: arguments, afterPositionals: 0, flags: ["--json"])
@@ -408,21 +440,82 @@ case "daemon":
                 } else { writeText("Error switching to '\(name)': \(error)", to: .standardError) }
             }
         }
-        let hotkeys = HotkeyManager { name in switchCoordinator.request(name) }
+        let focusController = WorkspaceFocusController()
+        let hotkeys = HotkeyManager { action in
+            switch action {
+            case .workspace(let name):
+                switchCoordinator.request(name)
+            case .focusPreviousApp, .focusNextApp, .focusPreviousWindow, .focusNextWindow:
+                let direction: FocusDirection = switch action {
+                case .focusPreviousApp, .focusPreviousWindow: .previous
+                default: .next
+                }
+                let target: FocusTarget = switch action {
+                case .focusPreviousWindow, .focusNextWindow: .window
+                default: .app
+                }
+                switchQueue.async {
+                    do {
+                        let result = target == .app
+                            ? try focusController.focus(direction)
+                            : try focusController.focusWindow(direction)
+                        if jsonRequested {
+                            try writeJSON(DaemonFocusResponse(event: "focus", result: result), pretty: false)
+                        } else {
+                            print("Focused \(result.bundleId) in workspace '\(result.workspace)'.")
+                        }
+                    } catch WorkspaceFocusError.noActiveWorkspace,
+                            WorkspaceFocusError.noRunningApplications,
+                            WorkspaceFocusError.noFocusableWindows {
+                        // Focus on an empty context is deliberately a quiet no-op.
+                    } catch {
+                        if jsonRequested {
+                            try? writeJSON(
+                                DaemonErrorResponse(event: "error", workspace: nil, error: errorBody(error, command: "daemon")),
+                                to: .standardError,
+                                pretty: false
+                            )
+                        } else { writeText("Error changing focus: \(error)", to: .standardError) }
+                    }
+                }
+            }
+        }
         let modifierNames = config.general.modifierNames
         let modifierLabel = modifierNames.joined(separator: "+")
         var registered: [DaemonHotkeyResponse] = []
+        var registeredFocus: [DaemonFocusHotkeyResponse] = []
         for workspace in config.workspaces {
             guard let key = workspace.hotkey else { continue }
             if hotkeys.register(workspace: workspace.name, key: key, modifierNames: modifierNames) {
                 registered.append(DaemonHotkeyResponse(workspace: workspace.name, shortcut: "\(modifierLabel)+\(key)"))
             }
         }
-        if jsonRequested { try writeJSON(DaemonReadyResponse(event: "ready", hotkeys: registered), pretty: false) }
-        else if registered.isEmpty { print("No workspaces have a hotkey configured. Add a hotkey in EDN and restart.") }
+        for (raw, action, target, direction) in [
+            (config.general.focus.previousApp, HotkeyAction.focusPreviousApp, FocusTarget.app, FocusDirection.previous),
+            (config.general.focus.nextApp, HotkeyAction.focusNextApp, FocusTarget.app, FocusDirection.next),
+            (config.general.focus.previousWindow, HotkeyAction.focusPreviousWindow, FocusTarget.window, FocusDirection.previous),
+            (config.general.focus.nextWindow, HotkeyAction.focusNextWindow, FocusTarget.window, FocusDirection.next)
+        ] {
+            guard let raw, let chord = HotkeyChord(rawValue: raw) else { continue }
+            if hotkeys.register(action: action, key: chord.key, modifierNames: chord.modifierNames) {
+                registeredFocus.append(DaemonFocusHotkeyResponse(target: target, direction: direction, shortcut: chord.rawValue))
+            }
+        }
+        if jsonRequested {
+            try writeJSON(
+                DaemonReadyResponse(event: "ready", hotkeys: registered, focusHotkeys: registeredFocus),
+                pretty: false
+            )
+        }
+        else if registered.isEmpty && registeredFocus.isEmpty {
+            print("No global shortcuts are configured. Add one in EDN and restart.")
+        }
         else {
             print("edn daemon running. Hotkeys:")
             for hotkey in registered { print("  \(hotkey.shortcut) -> \(hotkey.workspace)") }
+            for hotkey in registeredFocus {
+                print("  \(hotkey.shortcut) -> focus \(hotkey.direction.rawValue) \(hotkey.target.rawValue)")
+            }
         }
         hotkeys.run()
     } catch { fail(error, command: command, json: jsonRequested) }

@@ -131,3 +131,100 @@ final class ShortcutRecorder: NSButton {
         title = shortcutKey.map { "\(prefix) \($0.uppercased())" } ?? "Record Shortcut"
     }
 }
+
+/// Records a complete global chord, including its own modifiers. Unlike workspace
+/// shortcuts, focus controls do not inherit `hotkeyPrefix`, so ⌘[ and ⌘] can coexist
+/// with ⌥1...⌥9 workspace switching.
+final class GlobalShortcutRecorder: NSButton {
+    var onCaptureChanged: ((Bool) -> Void)?
+    var onShortcutChanged: ((String?) -> Void)?
+
+    private(set) var shortcut: String?
+    private var isCapturing = false
+
+    init(accessibilityLabel: String) {
+        super.init(frame: .zero)
+        bezelStyle = .rounded
+        setButtonType(.momentaryPushIn)
+        alignment = .center
+        setAccessibilityLabel(accessibilityLabel)
+        updateTitle()
+    }
+
+    required init?(coder: NSCoder) { nil }
+    override var acceptsFirstResponder: Bool { true }
+
+    func setShortcut(_ value: String?) {
+        shortcut = value
+        updateTitle()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        guard super.becomeFirstResponder() else { return false }
+        isCapturing = true
+        updateTitle()
+        onCaptureChanged?(true)
+        return true
+    }
+
+    override func resignFirstResponder() -> Bool {
+        guard super.resignFirstResponder() else { return false }
+        isCapturing = false
+        updateTitle()
+        onCaptureChanged?(false)
+        return true
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard isCapturing, window?.firstResponder === self else {
+            return super.performKeyEquivalent(with: event)
+        }
+        if !record(event) { NSSound.beep() }
+        return true
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 51 || event.keyCode == 117 {
+            shortcut = nil
+            updateTitle()
+            onShortcutChanged?(nil)
+            window?.makeFirstResponder(nil)
+            return
+        }
+        if event.keyCode == 48 || event.keyCode == 36 || event.keyCode == 53 {
+            super.keyDown(with: event)
+            return
+        }
+        if !record(event) { NSSound.beep() }
+    }
+
+    private func record(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        var modifiers: [String] = []
+        if flags.contains(.control) { modifiers.append("ctrl") }
+        if flags.contains(.option) { modifiers.append("alt") }
+        if flags.contains(.shift) { modifiers.append("shift") }
+        if flags.contains(.command) { modifiers.append("cmd") }
+        guard let key = HotkeyChord.normalizeKey(event.charactersIgnoringModifiers),
+              let chord = HotkeyChord(key: key, modifierNames: modifiers) else { return false }
+        shortcut = chord.rawValue
+        updateTitle()
+        onShortcutChanged?(chord.rawValue)
+        window?.makeFirstResponder(nil)
+        return true
+    }
+
+    private func updateTitle() {
+        if isCapturing {
+            title = "Press a Shortcut"
+        } else if let shortcut, let chord = HotkeyChord(rawValue: shortcut) {
+            title = chord.displayValue
+        } else {
+            title = "Record Shortcut"
+        }
+    }
+}

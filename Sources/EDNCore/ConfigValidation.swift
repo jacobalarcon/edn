@@ -31,6 +31,24 @@ public extension Config {
             issues.append("general.hotkeyPrefix contains the same modifier more than once")
         }
 
+        var globalHotkeys: Set<String> = []
+        for (path, value) in [
+            ("general.focus.previousApp", general.focus.previousApp),
+            ("general.focus.nextApp", general.focus.nextApp),
+            ("general.focus.previousWindow", general.focus.previousWindow),
+            ("general.focus.nextWindow", general.focus.nextWindow)
+        ] {
+            guard let value else { continue }
+            guard value == value.trimmingCharacters(in: .whitespacesAndNewlines),
+                  let chord = HotkeyChord(rawValue: value) else {
+                issues.append("\(path) must be a modified ASCII letter, digit, [ or ] such as 'cmd+['")
+                continue
+            }
+            if !globalHotkeys.insert(chord.rawValue).inserted {
+                issues.append("\(path) duplicates another global shortcut")
+            }
+        }
+
         var workspaceNames: Set<String> = []
         var workspaceNumbers: Set<Int> = []
         var hotkeys: Set<String> = []
@@ -63,6 +81,10 @@ public extension Config {
                 }
                 if !hotkeys.insert(normalized).inserted {
                     issues.append("\(path).hotkey '\(hotkey)' is already used by another workspace")
+                }
+                if let chord = HotkeyChord(key: normalized, modifierNames: modifiers),
+                   globalHotkeys.contains(chord.rawValue) {
+                    issues.append("\(path).hotkey '\(hotkey)' conflicts with a global focus shortcut")
                 }
             }
 

@@ -31,6 +31,23 @@ else
 fi
 
 $CLI save alpha --json | jq -e '.workspace == "alpha" and .fullyCaptured == true' >/dev/null
+
+set +e
+$CLI focus next --json >"$TEST_DIR/focus.stdout" 2>"$TEST_DIR/focus.error"
+FOCUS_STATUS=$?
+set -e
+test "$FOCUS_STATUS" -eq 1
+test ! -s "$TEST_DIR/focus.stdout"
+jq -e '.error.code == "no_running_applications" and .error.command == "focus"' "$TEST_DIR/focus.error" >/dev/null
+
+set +e
+$CLI focus next --window --json >"$TEST_DIR/window-focus.stdout" 2>"$TEST_DIR/window-focus.error"
+WINDOW_FOCUS_STATUS=$?
+set -e
+test "$WINDOW_FOCUS_STATUS" -eq 1
+test ! -s "$TEST_DIR/window-focus.stdout"
+jq -e '.error.code == "no_focusable_windows" and .error.command == "focus"' "$TEST_DIR/window-focus.error" >/dev/null
+
 $CLI reset alpha --yes --json | jq -e '.action == "reset" and .workspace == "alpha"' >/dev/null
 
 set +e
@@ -51,7 +68,7 @@ if [[ "$TRUSTED" == "true" ]]; then
     done
     kill -TERM "$DAEMON_PID" 2>/dev/null || true
     wait "$DAEMON_PID" 2>/dev/null || true
-    head -1 "$TEST_DIR/daemon.jsonl" | jq -e '.event == "ready" and (.hotkeys | type == "array")' >/dev/null
+    head -1 "$TEST_DIR/daemon.jsonl" | jq -e '.event == "ready" and (.hotkeys | type == "array") and (.focusHotkeys | type == "array")' >/dev/null
 fi
 
 echo "CLI JSON contract passed. Isolated artifacts: $TEST_DIR"

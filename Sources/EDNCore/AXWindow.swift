@@ -86,6 +86,19 @@ public struct AXWindow {
     public let frame: Frame?
     public let isMinimized: Bool
 
+    /// Read live because the main window changes whenever focus changes; unlike frame
+    /// metadata, caching this during enumeration would make the next keypress stale.
+    public var isMain: Bool {
+        Self.getBool(element, kAXMainAttribute) ?? false
+    }
+
+    /// Raises this exact live window without assigning it any persistent EDN identity.
+    @discardableResult
+    public func focus() -> Bool {
+        EDNInstrumentation.axWrite(kAXRaiseAction)
+        return AXUIElementPerformAction(element, kAXRaiseAction as CFString) == .success
+    }
+
     /// Applies a frame and reports what actually stuck. Order matters: size is set
     /// before position, because macOS clamps a window's position to fit the screen --
     /// moving first (while still the old, larger size) can cause the position to be
@@ -167,11 +180,19 @@ public protocol ManagedWindow {
     var subrole: String { get }
     var frame: Frame? { get }
     var isMinimized: Bool { get }
+    var isMain: Bool { get }
     func setFrame(_ frame: Frame) -> FrameApplyResult
     func setMinimized(_ minimized: Bool) -> Bool
+    func focus() -> Bool
 }
 
 extension AXWindow: ManagedWindow {}
+
+public extension ManagedWindow {
+    /// Layout-only test doubles and integrations do not need focus behavior.
+    var isMain: Bool { false }
+    func focus() -> Bool { false }
+}
 
 public protocol WindowManaging {
     var isTrusted: Bool { get }

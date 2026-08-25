@@ -4,6 +4,8 @@ EDN (pronounced “Eden”) is a fast, config-driven workspace manager for macOS
 
 EDN uses app hiding and showing rather than Mission Control Spaces, so switching is immediate and animation-free. It does not calculate layouts, silently assign apps, or isolate individual windows of the same app.
 
+Optional global shortcuts can move focus through the running apps or live windows in the active workspace. They follow explicit app order, include every standard window, and never launch apps, move windows, or change workspaces.
+
 **[Watch the 11-second demo →](docs/assets/demo.mp4)**
 
 ## The flow
@@ -54,6 +56,8 @@ edn list --json
 edn windows --json
 edn inspect coding --json
 edn switch coding --json
+edn focus next --json
+edn focus next --window --json
 ```
 
 `windows` reports the live desktop; `inspect` separates configured, remembered, and effective frames. Together they let an agent understand both what EDN was asked to do and what is actually on screen.
@@ -70,6 +74,7 @@ With `--json`, successful results go to standard output. Failures are emitted as
 
 - Workspace membership is explicit.
 - Window positions are remembered automatically when you switch away.
+- Focus shortcuts cycle only through running members and live windows of the active workspace.
 - Config is plain JSON at `~/.config/edn/config.json`.
 - Runtime layout state is kept separately at `~/.local/state/edn/state.json`.
 - Workspaces are app-level. For complete isolation between two windows of the same app, use macOS Spaces.

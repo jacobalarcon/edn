@@ -7,11 +7,29 @@ import Foundation
 /// when the daemon isn't the frontmost app. RegisterEventHotKey itself does not require
 /// Input Monitoring or Accessibility permission; EDN separately needs Accessibility
 /// permission for its window-management work.
+public enum HotkeyAction: Equatable, Sendable {
+    case workspace(String)
+    case focusPreviousApp
+    case focusNextApp
+    case focusPreviousWindow
+    case focusNextWindow
+
+    fileprivate var label: String {
+        switch self {
+        case .workspace(let name): return "workspace '\(name)'"
+        case .focusPreviousApp: return "Focus Previous App"
+        case .focusNextApp: return "Focus Next App"
+        case .focusPreviousWindow: return "Focus Previous Window"
+        case .focusNextWindow: return "Focus Next Window"
+        }
+    }
+}
+
 public final class HotkeyManager {
-    public typealias Handler = (_ workspaceName: String) -> Void
+    public typealias Handler = (_ action: HotkeyAction) -> Void
 
     private var hotKeyRefs: [EventHotKeyRef] = []
-    private var idToWorkspace: [UInt32: String] = [:]
+    private var idToAction: [UInt32: HotkeyAction] = [:]
     private var nextID: UInt32 = 1
     private let handler: Handler
     private var eventHandlerRef: EventHandlerRef?
@@ -45,8 +63,8 @@ public final class HotkeyManager {
             )
             guard status == noErr else { return status }
             let manager = Unmanaged<HotkeyManager>.fromOpaque(userData).takeUnretainedValue()
-            if let name = manager.idToWorkspace[hotKeyID.id] {
-                manager.handler(name)
+            if let action = manager.idToAction[hotKeyID.id] {
+                manager.handler(action)
             }
             return noErr
         }, 1, &eventType, selfPtr, &eventHandlerRef)
@@ -63,17 +81,25 @@ public final class HotkeyManager {
     /// key or a registration collision with another app's global hotkey.
     @discardableResult
     public func register(workspace name: String, key: String, modifierNames: [String]) -> Bool {
+        register(action: .workspace(name), key: key, modifierNames: modifierNames)
+    }
+
+    /// Registers any EDN action using the same Carbon delivery path as workspace
+    /// switching. Keeping one dispatcher prevents focus and switch shortcuts from
+    /// racing through separate global event handlers.
+    @discardableResult
+    public func register(action: HotkeyAction, key: String, modifierNames: [String]) -> Bool {
         guard eventHandlerInstalled else {
-            warn("cannot register hotkey for workspace '\(name)' because the event handler is unavailable")
+            warn("cannot register hotkey for \(action.label) because the event handler is unavailable")
             return false
         }
         guard let keyCode = Self.keyCode(for: key) else {
-            warn("no key mapping for '\(key)' -- skipping hotkey for workspace '\(name)'")
+            warn("no key mapping for '\(key)' -- skipping hotkey for \(action.label)")
             return false
         }
         let modifiers = modifierNames.reduce(UInt32(0)) { $0 | Self.modifierMask(for: $1) }
         guard modifiers != 0 else {
-            warn("no recognized modifier in \(modifierNames) -- skipping hotkey for workspace '\(name)'")
+            warn("no recognized modifier in \(modifierNames) -- skipping hotkey for \(action.label)")
             return false
         }
 
@@ -84,11 +110,11 @@ public final class HotkeyManager {
         let status = RegisterEventHotKey(UInt32(keyCode), modifiers, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
 
         guard status == noErr, let ref = hotKeyRef else {
-            warn("failed to register hotkey (\(modifierNames.joined(separator: "+"))+\(key)) for workspace '\(name)' -- status \(status). Likely already claimed by another app.")
+            warn("failed to register hotkey (\(modifierNames.joined(separator: "+"))+\(key)) for \(action.label) -- status \(status). Likely already claimed by another app.")
             return false
         }
         hotKeyRefs.append(ref)
-        idToWorkspace[id] = name
+        idToAction[id] = action
         return true
     }
 
@@ -132,7 +158,11 @@ public final class HotkeyManager {
             "u": kVK_ANSI_U, "v": kVK_ANSI_V, "w": kVK_ANSI_W, "x": kVK_ANSI_X, "y": kVK_ANSI_Y,
             "z": kVK_ANSI_Z
         ]
+        let punctuation: [String: Int] = [
+            "[": kVK_ANSI_LeftBracket,
+            "]": kVK_ANSI_RightBracket
+        ]
         let lower = key.lowercased()
-        return digits[lower] ?? letters[lower]
+        return digits[lower] ?? letters[lower] ?? punctuation[lower]
     }
 }

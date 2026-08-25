@@ -50,11 +50,32 @@ public struct WorkspaceConfig: Codable, Equatable {
     }
 }
 
+public struct FocusConfig: Codable, Equatable {
+    public var previousApp: String?
+    public var nextApp: String?
+    public var previousWindow: String?
+    public var nextWindow: String?
+
+    public init(
+        previousApp: String? = nil,
+        nextApp: String? = nil,
+        previousWindow: String? = nil,
+        nextWindow: String? = nil
+    ) {
+        self.previousApp = previousApp
+        self.nextApp = nextApp
+        self.previousWindow = previousWindow
+        self.nextWindow = nextWindow
+    }
+}
+
 public struct GeneralConfig: Codable, Equatable {
     public var hotkeyPrefix: String
+    public var focus: FocusConfig
 
-    public init(hotkeyPrefix: String = "alt") {
+    public init(hotkeyPrefix: String = "alt", focus: FocusConfig = FocusConfig()) {
         self.hotkeyPrefix = hotkeyPrefix
+        self.focus = focus
     }
 
     /// Supports a single modifier (`alt`) or combinations (`cmd+alt`) while keeping
@@ -63,6 +84,22 @@ public struct GeneralConfig: Codable, Equatable {
         hotkeyPrefix
             .split(separator: "+", omittingEmptySubsequences: false)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+    }
+
+    private enum CodingKeys: String, CodingKey { case hotkeyPrefix, focus }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        hotkeyPrefix = try container.decodeIfPresent(String.self, forKey: .hotkeyPrefix) ?? "alt"
+        focus = try container.decodeIfPresent(FocusConfig.self, forKey: .focus) ?? FocusConfig()
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(hotkeyPrefix, forKey: .hotkeyPrefix)
+        if focus != FocusConfig() {
+            try container.encode(focus, forKey: .focus)
+        }
     }
 }
 
