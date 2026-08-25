@@ -12,6 +12,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var configSignature: String?
     private var didSaveOnTermination = false
     private var hotkeysSuspended = false
+    private var didOfferAccessibilityThisLaunch = false
+    private var accessibilityPollTimer: Timer?
     private var manager: WorkspaceManagerWindowController?
     private var cachedInstalledApplications: [InstalledApplication]?
     private var lastSwitchIssues: [(workspace: String, bundleId: String, issue: SwitchIssue)] = []
@@ -30,6 +32,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
         reloadHotkeysIfNeeded(force: true)
         refreshStatusTitle()
+
+        if !AXWindowManager.isTrusted {
+            DispatchQueue.main.async { [weak self] in
+                self?.offerAccessibilitySetupIfNeeded()
+            }
+        }
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -186,6 +194,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     private func performSwitch(to name: String) {
+        guard AXWindowManager.isTrusted else {
+            offerAccessibilitySetupIfNeeded(force: true)
+            return
+        }
         switchCoordinator.request(name)
     }
 
@@ -199,6 +211,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 }
                 self?.refreshStatusTitle()
                 self?.manager?.reload()
+            }
+        } catch EngineError.notTrusted {
+            DispatchQueue.main.async { [weak self] in
+                self?.offerAccessibilitySetupIfNeeded(force: true)
             }
         } catch {
             DispatchQueue.main.async { [weak self] in
@@ -236,7 +252,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     @objc private func requestAccessibility() {
-        AXWindowManager.requestPermission()
+        offerAccessibilitySetupIfNeeded(force: true)
     }
 
     @objc private func openConfiguration() {
@@ -374,14 +390,22 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         do {
             let config = try Config.load()
             let active = try WorkspaceStateStore().read().activeWorkspace
+            let needsAccessibility = !AXWindowManager.isTrusted
             workspaceIndicator.update(
                 workspaces: config.workspaces,
                 activeWorkspace: active,
-                hasWarning: !lastSwitchIssues.isEmpty
+                hasWarning: needsAccessibility || !lastSwitchIssues.isEmpty
             )
             statusItem.length = workspaceIndicator.intrinsicContentSize.width
             let activeName = config.workspaces.first(where: { $0.name == active })?.name
-            let warning = lastSwitchIssues.isEmpty ? "" : " — layout needs attention"
+            let warning: String
+            if needsAccessibility {
+                warning = " — Accessibility permission required"
+            } else if !lastSwitchIssues.isEmpty {
+                warning = " — layout needs attention"
+            } else {
+                warning = ""
+            }
             statusItem.button?.toolTip = (activeName ?? "EDN Workspaces") + warning
             statusItem.button?.setAccessibilityLabel(
                 activeName.map { "EDN workspaces, \($0) active\(warning)" } ?? "EDN workspaces"
@@ -391,6 +415,48 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             statusItem.length = workspaceIndicator.intrinsicContentSize.width
             statusItem.button?.toolTip = "EDN configuration error"
         }
+    }
+
+    private func offerAccessibilitySetupIfNeeded(force: Bool = false) {
+        guard !AXWindowManager.isTrusted else {
+            accessibilityDidBecomeTrusted()
+            return
+        }
+        guard force || !didOfferAccessibilityThisLaunch else { return }
+        didOfferAccessibilityThisLaunch = true
+
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Allow EDN to Arrange Windows"
+        alert.informativeText = "EDN needs macOS Accessibility access to show, hide, move, and resize the apps in your workspaces. EDN does not monitor what you type."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Open System Settings")
+        alert.addButton(withTitle: "Not Now")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            refreshStatusTitle()
+            return
+        }
+
+        AXWindowManager.requestPermission()
+        startAccessibilityPolling()
+    }
+
+    private func startAccessibilityPolling() {
+        accessibilityPollTimer?.invalidate()
+        accessibilityPollTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] timer in
+            guard AXWindowManager.isTrusted else { return }
+            timer.invalidate()
+            self?.accessibilityPollTimer = nil
+            self?.accessibilityDidBecomeTrusted()
+        }
+    }
+
+    private func accessibilityDidBecomeTrusted() {
+        accessibilityPollTimer?.invalidate()
+        accessibilityPollTimer = nil
+        reloadHotkeysIfNeeded(force: true)
+        refreshStatusTitle()
     }
 
     private func switchIssueText(bundleId: String, issue: SwitchIssue) -> String {
