@@ -10,11 +10,10 @@ EDN is currently a technical preview. Beta builds are available from [GitHub Rel
 
 To try a beta:
 
-1. Download `EDN-<version>.zip` and its checksum from GitHub Releases.
-2. Verify it with `shasum -a 256 -c EDN-<version>.zip.sha256`.
-3. Move `EDN.app` to Applications and try to open it once.
-4. When macOS blocks it, open **System Settings → Privacy & Security**, scroll to **Security**, click **Open Anyway**, then confirm **Open**. This is [Apple's supported override](https://support.apple.com/guide/mac-help/apple-cant-check-app-for-malicious-software-mchleab3a043/mac); never disable Gatekeeper globally.
-5. EDN will then guide you through granting Accessibility access, which macOS requires to read and position windows.
+1. Download and unzip EDN.
+2. Move `EDN.app` to Applications and try to open it once.
+3. When macOS blocks it, open **System Settings → Privacy & Security**, scroll to **Security**, click **Open Anyway**, then confirm **Open**. This is [Apple's supported override](https://support.apple.com/guide/mac-help/apple-cant-check-app-for-malicious-software-mchleab3a043/mac); never disable Gatekeeper globally.
+4. EDN will then guide you through granting Accessibility access, which macOS requires to read and position windows.
 
 Because beta builds use an ad-hoc signature, macOS may ask for Accessibility approval again after an update. A stable release requires Developer ID signing and notarization and will not carry this limitation.
 
