@@ -127,15 +127,17 @@ final class ApplicationPickerViewController: NSViewController, NSTableViewDataSo
         return ApplicationRowView(
             icon: icons.icon(bundleId: application.bundleId, bundleURL: application.bundleURL),
             name: application.name,
-            detail: application.bundleId
+            bundleId: application.bundleId
         )
     }
 }
 
-/// One application line: real icon, name, and bundle id for disambiguation.
+/// One application line: real icon and human-facing name. The stable bundle id remains
+/// available as a tooltip for debugging without leaking implementation detail into the UI.
 final class ApplicationRowView: NSTableCellView {
-    init(icon: NSImage, name: String, detail: String) {
+    init(icon: NSImage, name: String, bundleId: String) {
         super.init(frame: .zero)
+        toolTip = bundleId
 
         let iconView = NSImageView()
         iconView.image = icon
@@ -148,15 +150,6 @@ final class ApplicationRowView: NSTableCellView {
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(nameLabel)
 
-        let detailLabel = NSTextField(labelWithString: detail)
-        detailLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        detailLabel.textColor = .secondaryLabelColor
-        detailLabel.lineBreakMode = .byTruncatingHead
-        detailLabel.alignment = .right
-        detailLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        detailLabel.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(detailLabel)
-
         textField = nameLabel
         imageView = iconView
 
@@ -168,10 +161,7 @@ final class ApplicationRowView: NSTableCellView {
 
             nameLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 8),
             nameLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-
-            detailLabel.leadingAnchor.constraint(greaterThanOrEqualTo: nameLabel.trailingAnchor, constant: 12),
-            detailLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            detailLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
+            nameLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -6)
         ])
     }
 

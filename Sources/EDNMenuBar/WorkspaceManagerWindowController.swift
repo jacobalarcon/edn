@@ -543,7 +543,7 @@ final class WorkspaceManagerWindowController: NSWindowController,
         return ApplicationRowView(
             icon: icons.icon(bundleId: app.bundleId, bundleURL: installed?.bundleURL),
             name: installed?.name ?? app.bundleId,
-            detail: app.bundleId
+            bundleId: app.bundleId
         )
     }
 
