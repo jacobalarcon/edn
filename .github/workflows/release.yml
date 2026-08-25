@@ -51,18 +51,30 @@ jobs:
             EDN_CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
             scripts/build-app.sh
 
-      - name: Notarize and rebuild archive
+      - name: Build beta disk image
+        if: ${{ contains(github.ref_name, '-beta.') }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          EDN_DMG_VERSION="$VERSION" scripts/build-dmg.sh
+
+      - name: Notarize release artifacts
         if: ${{ !contains(github.ref_name, '-beta.') }}
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           scripts/notarize.sh dist/EDN.app
           rm -f "dist/EDN-$VERSION.zip" "dist/EDN-$VERSION.zip.sha256"
           ditto -c -k --sequesterRsrc --keepParent dist/EDN.app "dist/EDN-$VERSION.zip"
           (cd dist && shasum -a 256 "EDN-$VERSION.zip" > "EDN-$VERSION.zip.sha256")
+          EDN_DMG_VERSION="$VERSION" \
+            EDN_CODE_SIGN_IDENTITY="$APPLE_SIGNING_IDENTITY" \
+            scripts/build-dmg.sh
+          scripts/notarize.sh "dist/EDN-$VERSION.dmg"
+          (cd dist && shasum -a 256 "EDN-$VERSION.dmg" > "EDN-$VERSION.dmg.sha256")
 
       - name: Publish GitHub release
         env:
@@ -71,6 +83,8 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           RELEASE_ARGS=(
             "$GITHUB_REF_NAME"
+            "dist/EDN-$VERSION.dmg"
+            "dist/EDN-$VERSION.dmg.sha256"
             "dist/EDN-$VERSION.zip"
             "dist/EDN-$VERSION.zip.sha256"
             --title "EDN $VERSION"

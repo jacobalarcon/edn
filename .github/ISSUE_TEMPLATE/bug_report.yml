@@ -1,0 +1,54 @@
+name: Bug report
+description: Report behavior that is broken or surprising
+title: "Bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for helping improve EDN. Please do not include private window titles, configuration, or other sensitive information unless it is necessary and safe to share.
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened?
+      description: Tell us what you saw and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How can we reproduce it?
+      placeholder: |
+        1. Open…
+        2. Switch to…
+        3. Observe…
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: EDN version
+      description: Find this under EDN menu → About EDN.
+      placeholder: 0.1.0 (build 9)
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and Mac architecture
+      placeholder: macOS 15.7.9, Apple Silicon
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add safe-to-share logs, screenshots, or relevant configuration excerpts if useful.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: I removed secrets and unrelated private information.
+          required: true

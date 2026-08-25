@@ -1,0 +1,29 @@
+name: Focused improvement
+description: Suggest a small improvement that fits EDN's model
+title: "Idea: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Start with the workflow or frustration, not a proposed implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would the smallest useful solution feel like?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What do you do today?
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: I understand EDN replays user-arranged layouts rather than continuously calculating them.
+          required: true

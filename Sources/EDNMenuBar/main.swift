@@ -15,6 +15,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var didSaveOnTermination = false
     private var hotkeysSuspended = false
     private var didOfferAccessibilityThisLaunch = false
+    private var shouldPresentFirstWorkspace = false
     private var accessibilityPollTimer: Timer?
     private var resumeWorkItem: DispatchWorkItem?
     /// Bundle IDs launched by an in-flight EDN switch. Their workspace-switch replay
@@ -61,16 +62,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         reloadHotkeysIfNeeded(force: true)
         refreshStatusTitle()
 
-        let needsFirstWorkspace = (try? Config.load().workspaces.isEmpty) == true
+        shouldPresentFirstWorkspace = (try? Config.load().workspaces.isEmpty) == true
             && !FileManager.default.fileExists(atPath: Config.defaultPath.path)
-        if needsFirstWorkspace {
-            DispatchQueue.main.async { [weak self] in
-                self?.presentManager(beginningCreate: false)
-            }
-        }
         if !AXWindowManager.isTrusted {
             DispatchQueue.main.async { [weak self] in
                 self?.offerAccessibilitySetupIfNeeded()
+            }
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.presentFirstWorkspaceIfNeeded()
             }
         }
     }
@@ -164,7 +164,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         launchAtLogin.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(launchAtLogin)
         addItem("Check for Updates…", action: #selector(checkForUpdates), to: menu)
+        addItem("Report an Issue…", action: #selector(reportIssue), to: menu)
         addItem("Open Configuration…", action: #selector(openConfiguration), to: menu)
+        addItem("About EDN", action: #selector(showAbout), to: menu)
         menu.addItem(.separator())
         addItem("Quit EDN", action: #selector(quit), keyEquivalent: "q", to: menu)
     }
@@ -349,10 +351,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     @objc private func checkForUpdates() {
-        let fallback = "https://github.com/jacobalarcon/edn/releases/latest"
+        let fallback = "https://github.com/jacobalarcon/edn/releases"
         let value = Bundle.main.object(forInfoDictionaryKey: "EDNReleaseURL") as? String
         guard let url = URL(string: value ?? fallback) else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    @objc private func reportIssue() {
+        guard let url = URL(string: "https://github.com/jacobalarcon/edn/issues/new/choose") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    @objc private func showAbout() {
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(nil)
     }
 
     @objc private func quit() {
@@ -558,6 +570,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
         guard alert.runModal() == .alertFirstButtonReturn else {
             refreshStatusTitle()
+            presentFirstWorkspaceIfNeeded()
             return
         }
 
@@ -580,6 +593,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         accessibilityPollTimer = nil
         reloadHotkeysIfNeeded(force: true)
         refreshStatusTitle()
+        presentFirstWorkspaceIfNeeded()
+    }
+
+    private func presentFirstWorkspaceIfNeeded() {
+        guard shouldPresentFirstWorkspace else { return }
+        shouldPresentFirstWorkspace = false
+        presentManager(beginningCreate: false)
     }
 
     @objc private func workspaceSessionResumed(_ notification: Notification) {

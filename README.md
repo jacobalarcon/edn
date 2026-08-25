@@ -1,5 +1,7 @@
 # EDN
 
+[![CI](https://github.com/jacobalarcon/edn/actions/workflows/ci.yml/badge.svg)](https://github.com/jacobalarcon/edn/actions/workflows/ci.yml)
+
 EDN (pronounced “Eden”) is a fast, config-driven workspace manager for macOS. You choose which apps belong to a workspace, arrange their windows yourself, and EDN remembers and replays that layout when you return.
 
 EDN uses app hiding and showing rather than Mission Control Spaces, so switching is immediate and animation-free. It does not calculate layouts, silently assign apps, or isolate individual windows of the same app.
@@ -24,12 +26,12 @@ Optional global shortcuts can move focus through the running apps or live window
 
 ## Install
 
-EDN is currently a technical preview. Beta builds are available from [GitHub Releases](https://github.com/jacobalarcon/edn/releases), but they are not yet notarized by Apple.
+EDN requires macOS 13 or newer. It is currently a technical preview: beta builds are available from [GitHub Releases](https://github.com/jacobalarcon/edn/releases), but they are not yet notarized by Apple.
 
 To try a beta:
 
-1. Download and unzip EDN.
-2. Move `EDN.app` to Applications and try to open it once.
+1. Download and open the EDN disk image (`.dmg`).
+2. Drag `EDN.app` to Applications and try to open it once.
 3. When macOS blocks it, open **System Settings → Privacy & Security**, scroll to **Security**, click **Open Anyway**, then confirm **Open**. This is [Apple's supported override](https://support.apple.com/guide/mac-help/apple-cant-check-app-for-malicious-software-mchleab3a043/mac); never disable Gatekeeper globally.
 4. EDN will then guide you through granting Accessibility access, which macOS requires to read and position windows.
 
@@ -90,6 +92,16 @@ open dist/EDN.app
 ```
 
 Set `EDN_UNIVERSAL=1` to build a universal Intel and Apple Silicon app. Set `EDN_CODE_SIGN_IDENTITY` to a Developer ID Application identity for distribution signing; local builds are ad-hoc signed.
+
+## Feedback and security
+
+Found a bug or have a focused improvement? [Open an issue](https://github.com/jacobalarcon/edn/issues/new/choose). Please use [GitHub's private vulnerability reporting](https://github.com/jacobalarcon/edn/security/advisories/new) for security-sensitive reports.
+
+Contributions are welcome; read [CONTRIBUTING.md](CONTRIBUTING.md) before proposing a new feature so EDN's deliberately small scope stays coherent.
+
+## Acknowledgements
+
+EDN is inspired by [FlashSpace](https://github.com/wojciech-kulik/FlashSpace)'s instant workspace switching and [AeroSpace](https://github.com/nikitabobko/AeroSpace)'s config-first macOS tooling. EDN is an independent implementation centered on replaying layouts that users arrange themselves.
 
 ## Release signing
 
