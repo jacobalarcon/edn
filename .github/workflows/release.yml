@@ -12,9 +12,10 @@ jobs:
   release:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Import Developer ID certificate
+        if: ${{ !contains(github.ref_name, '-beta.') }}
         env:
           CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
           CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -31,16 +32,27 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
 
-      - name: Build signed universal app
+      - name: Build universal app
         env:
-          EDN_VERSION: ${{ github.ref_name }}
           EDN_BUILD_NUMBER: ${{ github.run_number }}
           EDN_UNIVERSAL: "1"
-          EDN_CODE_SIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
-          EDN_VERSION="${EDN_VERSION#v}" scripts/build-app.sh
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          MARKETING_VERSION="${TAG_VERSION%%-*}"
+          if [[ "$TAG_VERSION" == *-beta.* ]]; then
+            SIGNING_IDENTITY="-"
+          else
+            test -n "$APPLE_SIGNING_IDENTITY"
+            SIGNING_IDENTITY="$APPLE_SIGNING_IDENTITY"
+          fi
+          EDN_VERSION="$MARKETING_VERSION" \
+            EDN_ARCHIVE_VERSION="$TAG_VERSION" \
+            EDN_CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
+            scripts/build-app.sh
 
       - name: Notarize and rebuild archive
+        if: ${{ !contains(github.ref_name, '-beta.') }}
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
@@ -57,8 +69,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          gh release create "$GITHUB_REF_NAME" \
-            "dist/EDN-$VERSION.zip" \
-            "dist/EDN-$VERSION.zip.sha256" \
-            --generate-notes \
+          RELEASE_ARGS=(
+            "$GITHUB_REF_NAME"
+            "dist/EDN-$VERSION.zip"
+            "dist/EDN-$VERSION.zip.sha256"
             --title "EDN $VERSION"
+          )
+          if [[ "$VERSION" == *-beta.* ]]; then
+            RELEASE_ARGS+=(
+              --prerelease
+              --latest=false
+              --notes-file Packaging/BetaReleaseNotes.md
+            )
+          else
+            RELEASE_ARGS+=(--generate-notes)
+          fi
+          gh release create "${RELEASE_ARGS[@]}"

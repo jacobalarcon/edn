@@ -6,7 +6,17 @@ EDN uses app hiding and showing rather than Mission Control Spaces, so switching
 
 ## Install
 
-The first public release will be available from [GitHub Releases](https://github.com/jacobalarcon/edn/releases). Download `EDN-<version>.zip`, move `EDN.app` to Applications, and open it. EDN will guide you to grant Accessibility access, which macOS requires for reading and positioning windows.
+EDN is currently a technical preview. Beta builds are available from [GitHub Releases](https://github.com/jacobalarcon/edn/releases), but they are not yet notarized by Apple.
+
+To try a beta:
+
+1. Download `EDN-<version>.zip` and its checksum from GitHub Releases.
+2. Verify it with `shasum -a 256 -c EDN-<version>.zip.sha256`.
+3. Move `EDN.app` to Applications and try to open it once.
+4. When macOS blocks it, open **System Settings → Privacy & Security**, scroll to **Security**, click **Open Anyway**, then confirm **Open**. This is [Apple's supported override](https://support.apple.com/guide/mac-help/apple-cant-check-app-for-malicious-software-mchleab3a043/mac); never disable Gatekeeper globally.
+5. EDN will then guide you through granting Accessibility access, which macOS requires to read and position windows.
+
+Because beta builds use an ad-hoc signature, macOS may ask for Accessibility approval again after an update. A stable release requires Developer ID signing and notarization and will not carry this limitation.
 
 For a local development build:
 

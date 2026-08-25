@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 VERSION="${EDN_VERSION:-0.1.0}"
+ARCHIVE_VERSION="${EDN_ARCHIVE_VERSION:-$VERSION}"
 BUILD_NUMBER="${EDN_BUILD_NUMBER:-1}"
 if [[ -n "${EDN_CODE_SIGN_IDENTITY:-}" ]]; then
     IDENTITY="$EDN_CODE_SIGN_IDENTITY"
@@ -68,7 +69,7 @@ codesign "${SIGN_ARGS[@]}" --identifier com.jacobalarcon.edn.cli "$APP_DIR/Conte
 codesign "${SIGN_ARGS[@]}" --identifier com.jacobalarcon.edn "$APP_DIR"
 codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 
-ARCHIVE="$ROOT_DIR/dist/EDN-$VERSION.zip"
+ARCHIVE="$ROOT_DIR/dist/EDN-$ARCHIVE_VERSION.zip"
 rm -f "$ARCHIVE" "$ARCHIVE.sha256"
 ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$ARCHIVE"
 (cd "$ROOT_DIR/dist" && shasum -a 256 "$(basename "$ARCHIVE")" > "$(basename "$ARCHIVE").sha256")
