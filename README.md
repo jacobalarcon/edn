@@ -20,6 +20,27 @@ The one-time local signing setup gives rebuilds a persistent macOS identity, so 
 
 The packaged CLI lives at `EDN.app/Contents/Helpers/edn`. A future Homebrew Cask will expose it automatically alongside the app.
 
+## Command line and agents
+
+Every finite command supports `--json`, so people, scripts, and agents use the same interface. Human-readable output remains the default.
+
+```sh
+edn list --json
+edn windows --json
+edn inspect coding --json
+edn switch coding --json
+```
+
+`windows` reports the live desktop; `inspect` separates configured, remembered, and effective frames. Together they let an agent understand both what EDN was asked to do and what is actually on screen.
+
+With `--json`, successful results go to standard output. Failures are emitted as a stable object on standard error and return a nonzero exit status:
+
+```json
+{"error":{"code":"workspace_not_found","message":"workspace not found: coding","command":"inspect"}}
+```
+
+`edn daemon --json` is the one long-running exception: it emits one compact JSON event per line as hotkeys are registered and switches occur.
+
 ## The model
 
 - Workspace membership is explicit.

@@ -1,55 +1,64 @@
 import Foundation
 import EDNCore
 
-// Unbuffered stdout: `edn daemon` is long-running and often piped to a log file,
-// where fully-buffered stdio would otherwise delay (or lose, on a hard kill) output.
 setvbuf(stdout, nil, _IONBF, 0)
 
-do {
-    for migration in try StorageMigration.migrateLegacyFilesIfNeeded() {
-        FileHandle.standardError.write(
-            "edn: migrated \(migration.kind) from \(migration.source.path) to \(migration.destination.path) (legacy file preserved)\n"
-                .data(using: .utf8)!
-        )
+enum CLIError: Error, CustomStringConvertible {
+    case missingValue(String), invalidValue(String), confirmationRequired(String)
+    var description: String {
+        switch self {
+        case .missingValue(let value): return "Missing value for \(value)."
+        case .invalidValue(let value): return value
+        case .confirmationRequired(let value): return "\(value) changes saved data; rerun with --yes."
+        }
     }
-} catch {
-    FileHandle.standardError.write("edn: warning: legacy storage migration failed: \(error)\n".data(using: .utf8)!)
 }
+
+struct ErrorBody: Encodable { let code: String; let message: String; let command: String? }
+struct ErrorEnvelope: Encodable { let error: ErrorBody }
+struct InitResponse: Encodable { let configPath: String; let created: Bool }
+struct StatusResponse: Encodable { let accessibilityTrusted: Bool; let configPath: String; let statePath: String }
+struct WorkspaceSummary: Encodable {
+    let name: String; let number: Int; let hotkey: String?; let appCount: Int; let isActive: Bool
+}
+struct WorkspaceListResponse: Encodable { let activeWorkspace: String?; let workspaces: [WorkspaceSummary] }
+struct FrameApplyResponse: Encodable {
+    let requested: Frame; let actual: Frame?; let positionMatched: Bool; let sizeMatched: Bool; let fullyMatched: Bool
+}
+struct SwitchIssueResponse: Encodable { let code: String; let expected: Int; let actual: Int }
+struct AppSwitchResponse: Encodable {
+    let bundleId: String; let activation: String; let succeeded: Bool
+    let frames: [FrameApplyResponse]; let issue: SwitchIssueResponse?
+}
+struct SwitchResponse: Encodable { let workspace: String; let apps: [AppSwitchResponse] }
+struct SaveResponse: Encodable {
+    let workspace: String; let captured: [String]; let missing: [String]; let fullyCaptured: Bool
+}
+struct MutationResponse: Encodable { let action: String; let workspace: String }
+struct DaemonHotkeyResponse: Encodable { let workspace: String; let shortcut: String }
+struct DaemonReadyResponse: Encodable { let event: String; let hotkeys: [DaemonHotkeyResponse] }
+struct DaemonSwitchResponse: Encodable { let event: String; let result: SwitchResponse }
+struct DaemonErrorResponse: Encodable { let event: String; let workspace: String?; let error: ErrorBody }
 
 func printUsage() {
     print("""
     edn - instant, config-driven workspaces with remembered window layouts for macOS
 
     Usage:
-      edn init                   Create an empty config at ~/.config/edn/config.json
-      edn list                   List configured workspaces
-      edn windows [--json]       Show visible apps, windows, frames, and displays
-      edn create <name> [options]
-                                 Create a workspace; options: --hotkey K,
-                                 --from-visible, --json
-      edn inspect <name> [--json]
-                                 Show configured, remembered, and effective layout
-      edn switch <name>          Switch to a workspace (hide others, activate + position its apps)
-      edn save [name]            Snapshot a workspace's current window frames to state
-      edn reset <name> --yes     Forget remembered frames and return to config defaults
-      edn delete <name> --yes    Delete a workspace from config and state
-      edn status                 Show Accessibility permission status
-      edn daemon                 Run in the background, listening for configured hotkeys
+      edn init [--json]            Create an empty config at ~/.config/edn/config.json
+      edn list [--json]            List configured workspaces
+      edn windows [--json]         Show visible apps, windows, frames, and displays
+      edn create <name> [options]  Options: --hotkey K, --from-visible, --json
+      edn inspect <name> [--json]  Show configured, remembered, and effective layout
+      edn switch <name> [--json]   Switch to a workspace
+      edn save [name] [--json]     Snapshot current window frames
+      edn reset <name> --yes [--json]
+                                  Forget remembered frames
+      edn delete <name> --yes [--json]
+                                  Delete a workspace from config and state
+      edn status [--json]          Show Accessibility permission status
+      edn daemon [--json]          Listen for hotkeys; --json emits an event stream
     """)
-}
-
-enum CLIError: Error, CustomStringConvertible {
-    case missingValue(String)
-    case invalidValue(String)
-    case confirmationRequired(String)
-
-    var description: String {
-        switch self {
-        case .missingValue(let option): return "Missing value for \(option)."
-        case .invalidValue(let message): return message
-        case .confirmationRequired(let command): return "\(command) changes saved data; rerun with --yes."
-        }
-    }
 }
 
 func optionValue(_ option: String, in arguments: [String]) throws -> String? {
@@ -89,11 +98,59 @@ func validateOptions(
     }
 }
 
-func printJSON<Value: Encodable>(_ value: Value) throws {
+func encodedJSON<Value: Encodable>(_ value: Value, pretty: Bool) throws -> Data {
     let encoder = JSONEncoder()
-    encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-    let data = try encoder.encode(value)
-    print(String(decoding: data, as: UTF8.self))
+    encoder.outputFormatting = pretty
+        ? [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        : [.sortedKeys, .withoutEscapingSlashes]
+    return try encoder.encode(value)
+}
+
+func writeJSON<Value: Encodable>(
+    _ value: Value,
+    to handle: FileHandle = .standardOutput,
+    pretty: Bool = true
+) throws {
+    var data = try encodedJSON(value, pretty: pretty)
+    data.append(0x0A)
+    handle.write(data)
+}
+
+func writeText(_ text: String, to handle: FileHandle = .standardOutput) {
+    handle.write(Data((text + "\n").utf8))
+}
+
+func errorBody(_ error: Error, command: String?) -> ErrorBody {
+    let code: String
+    switch error {
+    case CLIError.missingValue: code = "missing_value"
+    case CLIError.invalidValue: code = "invalid_arguments"
+    case CLIError.confirmationRequired: code = "confirmation_required"
+    case EngineError.notTrusted: code = "accessibility_not_trusted"
+    case EngineError.workspaceNotFound: code = "workspace_not_found"
+    case EngineError.workspaceActivationFailed: code = "workspace_activation_failed"
+    case WorkspaceAuthoringError.workspaceAlreadyExists: code = "workspace_already_exists"
+    case WorkspaceAuthoringError.workspaceNotFound: code = "workspace_not_found"
+    case WorkspaceAuthoringError.noVisibleApplications: code = "no_visible_applications"
+    case WorkspaceAuthoringError.applicationUnavailable: code = "application_unavailable"
+    case WorkspaceAuthoringError.duplicateApplicationProcess: code = "duplicate_application_process"
+    case WorkspaceAuthoringError.ambiguousWindows: code = "ambiguous_windows"
+    case is ConfigValidationError: code = "invalid_config"
+    default: code = "command_failed"
+    }
+    return ErrorBody(code: code, message: String(describing: error), command: command)
+}
+
+func fail(_ error: Error, command: String?, json: Bool) -> Never {
+    if json {
+        let envelope = ErrorEnvelope(error: errorBody(error, command: command))
+        if (try? writeJSON(envelope, to: .standardError)) == nil {
+            writeText("{\"error\":{\"code\":\"encoding_failed\",\"message\":\"Could not encode CLI error.\"}}", to: .standardError)
+        }
+    } else {
+        writeText("Error: \(error)", to: .standardError)
+    }
+    exit(1)
 }
 
 func frameText(_ frame: Frame?) -> String {
@@ -101,54 +158,119 @@ func frameText(_ frame: Frame?) -> String {
     return "x=\(frame.x) y=\(frame.y) w=\(frame.w) h=\(frame.h)"
 }
 
-let args = CommandLine.arguments.dropFirst()
-guard let command = args.first else {
+func activationName(_ activation: AppActivationResult) -> String {
+    switch activation {
+    case .activated: return "activated"
+    case .launched: return "launched"
+    case .applicationNotFound: return "application_not_found"
+    case .launchTimedOut: return "launch_timed_out"
+    case .failed: return "failed"
+    }
+}
+
+func switchResponse(workspace: String, results: [SwitchResult]) -> SwitchResponse {
+    SwitchResponse(workspace: workspace, apps: results.map { result in
+        let issue: SwitchIssueResponse?
+        switch result.issue {
+        case .windowCountMismatch(let expected, let actual):
+            issue = SwitchIssueResponse(code: "window_count_mismatch", expected: expected, actual: actual)
+        case nil:
+            issue = nil
+        }
+        return AppSwitchResponse(
+            bundleId: result.bundleId,
+            activation: activationName(result.activation),
+            succeeded: result.appWasPresented && issue == nil,
+            frames: result.applies.map {
+                FrameApplyResponse(
+                    requested: $0.requested,
+                    actual: $0.actual,
+                    positionMatched: $0.positionMatched,
+                    sizeMatched: $0.sizeMatched,
+                    fullyMatched: $0.fullyMatched
+                )
+            },
+            issue: issue
+        )
+    })
+}
+
+let commandLineArguments = Array(CommandLine.arguments.dropFirst())
+let jsonRequested = commandLineArguments.contains("--json")
+guard let command = commandLineArguments.first else {
     printUsage()
     exit(0)
+}
+let arguments = Array(commandLineArguments.dropFirst())
+
+do {
+    for migration in try StorageMigration.migrateLegacyFilesIfNeeded() {
+        writeText(
+            "edn: migrated \(migration.kind) from \(migration.source.path) to \(migration.destination.path) (legacy file preserved)",
+            to: .standardError
+        )
+    }
+} catch {
+    writeText("edn: warning: legacy storage migration failed: \(error)", to: .standardError)
 }
 
 switch command {
 case "status":
-    print(AXWindowManager.isTrusted ? "Accessibility: TRUSTED" : "Accessibility: NOT TRUSTED")
-    if !AXWindowManager.isTrusted {
-        AXWindowManager.requestPermission()
-    }
+    do {
+        try validateOptions(in: arguments, afterPositionals: 0, flags: ["--json"])
+        let response = StatusResponse(
+            accessibilityTrusted: AXWindowManager.isTrusted,
+            configPath: Config.defaultPath.path,
+            statePath: WorkspaceState.defaultPath.path
+        )
+        if jsonRequested { try writeJSON(response) }
+        else { print(response.accessibilityTrusted ? "Accessibility: TRUSTED" : "Accessibility: NOT TRUSTED") }
+    } catch { fail(error, command: command, json: jsonRequested) }
 
 case "init":
-    let path = Config.defaultPath
-    if FileManager.default.fileExists(atPath: path.path) {
-        print("Config already exists at \(path.path)")
-    } else {
-        do {
-            try Config().save(to: path)
-            print("Created empty config at \(path.path)")
-        } catch {
-            print("Failed to write config: \(error)")
-            exit(1)
-        }
-    }
+    do {
+        try validateOptions(in: arguments, afterPositionals: 0, flags: ["--json"])
+        let path = Config.defaultPath
+        let created = !FileManager.default.fileExists(atPath: path.path)
+        if created { try Config().save(to: path) }
+        if jsonRequested { try writeJSON(InitResponse(configPath: path.path, created: created)) }
+        else if created { print("Created empty config at \(path.path)") }
+        else { print("Config already exists at \(path.path)") }
+    } catch { fail(error, command: command, json: jsonRequested) }
 
 case "list":
     do {
+        try validateOptions(in: arguments, afterPositionals: 0, flags: ["--json"])
         let config = try Config.load()
-        for ws in config.workspaces.sorted(by: { $0.number < $1.number }) {
-            let hotkey = ws.hotkey.map { " [\($0)]" } ?? ""
-            print("\(ws.number). \(ws.name)\(hotkey) - \(ws.apps.count) app(s)")
+        let active = try WorkspaceStateStore().read().activeWorkspace
+        let workspaces = config.workspaces.sorted(by: { $0.number < $1.number })
+        if jsonRequested {
+            try writeJSON(WorkspaceListResponse(
+                activeWorkspace: active,
+                workspaces: workspaces.map {
+                    WorkspaceSummary(
+                        name: $0.name,
+                        number: $0.number,
+                        hotkey: $0.hotkey,
+                        appCount: $0.apps.count,
+                        isActive: $0.name == active
+                    )
+                }
+            ))
+        } else {
+            for workspace in workspaces {
+                let hotkey = workspace.hotkey.map { " [\($0)]" } ?? ""
+                print("\(workspace.number). \(workspace.name)\(hotkey) - \(workspace.apps.count) app(s)")
+            }
         }
-    } catch {
-        print("Failed to load config (\(Config.defaultPath.path)): \(error)")
-        print("Run 'edn init' to create one.")
-        exit(1)
-    }
+    } catch { fail(error, command: command, json: jsonRequested) }
 
 case "windows":
     do {
-        let commandArguments = Array(args.dropFirst())
-        try validateOptions(in: commandArguments, afterPositionals: 0, flags: ["--json"])
+        try validateOptions(in: arguments, afterPositionals: 0, flags: ["--json"])
         let snapshot = try SystemWorkspaceDiscovery().visibleDesktop()
-        if commandArguments.contains("--json") {
-            try printJSON(snapshot)
-        } else {
+        if jsonRequested { try writeJSON(snapshot) }
+        else {
             print("Displays:")
             for display in snapshot.displays {
                 let main = display.isMain ? " [main]" : ""
@@ -163,51 +285,32 @@ case "windows":
                 }
             }
         }
-    } catch {
-        print("Error: \(error)")
-        exit(1)
-    }
+    } catch { fail(error, command: command, json: jsonRequested) }
 
 case "create":
     do {
-        let commandArguments = Array(args.dropFirst())
-        guard let name = commandArguments.first, !name.hasPrefix("--") else {
+        guard let name = arguments.first, !name.hasPrefix("--") else {
             throw CLIError.invalidValue("Usage: edn create <name> [--hotkey K] [--from-visible] [--json]")
         }
-        try validateOptions(
-            in: commandArguments,
-            afterPositionals: 1,
-            valueOptions: ["--hotkey"],
-            flags: ["--from-visible", "--json"]
-        )
-        // Position in the row is structural, not something a caller sets: a new
-        // workspace always appends after the last one. See Config.renumberContiguously.
+        try validateOptions(in: arguments, afterPositionals: 1, valueOptions: ["--hotkey"], flags: ["--from-visible", "--json"])
         let workspace = try WorkspaceAuthor().create(
             name: name,
-            hotkey: try optionValue("--hotkey", in: commandArguments),
-            fromVisibleApplications: commandArguments.contains("--from-visible")
+            hotkey: try optionValue("--hotkey", in: arguments),
+            fromVisibleApplications: arguments.contains("--from-visible")
         )
-        if commandArguments.contains("--json") {
-            try printJSON(workspace)
-        } else {
-            print("Created workspace '\(workspace.name)' as number \(workspace.number) with \(workspace.apps.count) app/window entry(s).")
-        }
-    } catch {
-        print("Error: \(error)")
-        exit(1)
-    }
+        if jsonRequested { try writeJSON(workspace) }
+        else { print("Created workspace '\(workspace.name)' as number \(workspace.number) with \(workspace.apps.count) app/window entry(s).") }
+    } catch { fail(error, command: command, json: jsonRequested) }
 
 case "inspect":
     do {
-        let commandArguments = Array(args.dropFirst())
-        guard let name = commandArguments.first, !name.hasPrefix("--") else {
+        guard let name = arguments.first, !name.hasPrefix("--") else {
             throw CLIError.invalidValue("Usage: edn inspect <name> [--json]")
         }
-        try validateOptions(in: commandArguments, afterPositionals: 1, flags: ["--json"])
+        try validateOptions(in: arguments, afterPositionals: 1, flags: ["--json"])
         let inspection = try WorkspaceAuthor().inspect(name: name)
-        if commandArguments.contains("--json") {
-            try printJSON(inspection)
-        } else {
+        if jsonRequested { try writeJSON(inspection) }
+        else {
             let active = inspection.isActive ? " [active]" : ""
             print("\(inspection.number). \(inspection.name)\(active) hotkey=\(inspection.hotkey ?? "none")")
             for app in inspection.apps {
@@ -218,128 +321,115 @@ case "inspect":
                 print("    effective:  \(app.effectiveFrames.map { frameText($0) }.joined(separator: "; "))")
             }
         }
-    } catch {
-        print("Error: \(error)")
-        exit(1)
-    }
+    } catch { fail(error, command: command, json: jsonRequested) }
 
 case "switch":
-    guard let name = args.dropFirst().first else {
-        print("Usage: edn switch <workspace-name>")
-        exit(1)
-    }
     do {
-        let config = try Config.load()
-        let engine = WorkspaceEngine(config: config)
-        let results = try engine.switchTo(name)
-        for result in results {
-            print(result.summary)
+        guard let name = arguments.first, !name.hasPrefix("--") else {
+            throw CLIError.invalidValue("Usage: edn switch <workspace-name> [--json]")
         }
-    } catch {
-        print("Error: \(error)")
-        exit(1)
-    }
+        try validateOptions(in: arguments, afterPositionals: 1, flags: ["--json"])
+        let results = try WorkspaceEngine(config: Config.load()).switchTo(name)
+        if jsonRequested { try writeJSON(switchResponse(workspace: name, results: results)) }
+        else { for result in results { print(result.summary) } }
+    } catch { fail(error, command: command, json: jsonRequested) }
 
 case "save":
     do {
-        let config = try Config.load()
-        let engine = WorkspaceEngine(config: config)
-        guard let name = try args.dropFirst().first ?? engine.activeWorkspace() else {
-            print("No active workspace to save. Usage: edn save <workspace-name>")
-            exit(1)
+        let positionalCount = arguments.first.map { $0.hasPrefix("--") ? 0 : 1 } ?? 0
+        try validateOptions(in: arguments, afterPositionals: positionalCount, flags: ["--json"])
+        let engine = WorkspaceEngine(config: try Config.load())
+        let explicitName = positionalCount == 1 ? arguments.first : nil
+        guard let name = try explicitName ?? engine.activeWorkspace() else {
+            throw CLIError.invalidValue("No active workspace to save. Usage: edn save <workspace-name> [--json]")
         }
         let result = try engine.snapshot(workspace: name)
-        print("Saved layouts for \(result.captured.count) app(s) in workspace '\(name)'")
-        if !result.missing.isEmpty {
-            FileHandle.standardError.write(
-                "edn: warning: could not capture: \(result.missing.joined(separator: ", "))\n".data(using: .utf8)!
-            )
-            exit(1)
+        if jsonRequested {
+            try writeJSON(SaveResponse(
+                workspace: result.workspace,
+                captured: result.captured,
+                missing: result.missing,
+                fullyCaptured: result.fullyCaptured
+            ))
+        } else {
+            print("Saved layouts for \(result.captured.count) app(s) in workspace '\(name)'")
+            if !result.missing.isEmpty {
+                writeText("edn: warning: could not capture: \(result.missing.joined(separator: ", "))", to: .standardError)
+            }
         }
-    } catch {
-        print("Error: \(error)")
-        exit(1)
-    }
+        if !result.fullyCaptured { exit(1) }
+    } catch { fail(error, command: command, json: jsonRequested) }
 
 case "reset":
     do {
-        let commandArguments = Array(args.dropFirst())
-        guard let name = commandArguments.first, !name.hasPrefix("--") else {
-            throw CLIError.invalidValue("Usage: edn reset <name> --yes")
+        guard let name = arguments.first, !name.hasPrefix("--") else {
+            throw CLIError.invalidValue("Usage: edn reset <name> --yes [--json]")
         }
-        try validateOptions(in: commandArguments, afterPositionals: 1, flags: ["--yes"])
-        guard commandArguments.contains("--yes") else {
-            throw CLIError.confirmationRequired("reset")
-        }
+        try validateOptions(in: arguments, afterPositionals: 1, flags: ["--yes", "--json"])
+        guard arguments.contains("--yes") else { throw CLIError.confirmationRequired("reset") }
         try WorkspaceAuthor().reset(name: name)
-        print("Reset remembered frames for workspace '\(name)'.")
-    } catch {
-        print("Error: \(error)")
-        exit(1)
-    }
+        if jsonRequested { try writeJSON(MutationResponse(action: "reset", workspace: name)) }
+        else { print("Reset remembered frames for workspace '\(name)'.") }
+    } catch { fail(error, command: command, json: jsonRequested) }
 
 case "delete":
     do {
-        let commandArguments = Array(args.dropFirst())
-        guard let name = commandArguments.first, !name.hasPrefix("--") else {
-            throw CLIError.invalidValue("Usage: edn delete <name> --yes")
+        guard let name = arguments.first, !name.hasPrefix("--") else {
+            throw CLIError.invalidValue("Usage: edn delete <name> --yes [--json]")
         }
-        try validateOptions(in: commandArguments, afterPositionals: 1, flags: ["--yes"])
-        guard commandArguments.contains("--yes") else {
-            throw CLIError.confirmationRequired("delete")
-        }
+        try validateOptions(in: arguments, afterPositionals: 1, flags: ["--yes", "--json"])
+        guard arguments.contains("--yes") else { throw CLIError.confirmationRequired("delete") }
         try WorkspaceAuthor().delete(name: name)
-        print("Deleted workspace '\(name)' from config and state.")
-    } catch {
-        print("Error: \(error)")
-        exit(1)
-    }
+        if jsonRequested { try writeJSON(MutationResponse(action: "delete", workspace: name)) }
+        else { print("Deleted workspace '\(name)' from config and state.") }
+    } catch { fail(error, command: command, json: jsonRequested) }
 
 case "daemon":
-    guard AXWindowManager.isTrusted else {
-        print("Accessibility not trusted. Run 'edn status' to trigger the permission prompt, grant it, then retry.")
-        exit(1)
-    }
     do {
+        try validateOptions(in: arguments, afterPositionals: 0, flags: ["--json"])
+        guard AXWindowManager.isTrusted else { throw EngineError.notTrusted }
         let config = try Config.load()
         let engine = WorkspaceEngine(config: config)
-        // All switch work runs serially off Carbon's callback thread so a hung app's
-        // AX call can't stall hotkey delivery for the rest of the workspaces.
         let switchQueue = DispatchQueue(label: "edn.switch")
         let switchCoordinator = WorkspaceSwitchCoordinator(queue: switchQueue) { name in
             do {
-                try engine.reloadConfig() // pick up valid config edits without restarting the daemon
+                try engine.reloadConfig()
                 let results = try engine.switchTo(name)
-                for result in results { print(result.summary) }
+                let response = switchResponse(workspace: name, results: results)
+                if jsonRequested { try writeJSON(DaemonSwitchResponse(event: "switch", result: response), pretty: false) }
+                else { for result in results { print(result.summary) } }
             } catch {
-                print("Error switching to '\(name)': \(error)")
+                if jsonRequested {
+                    try? writeJSON(
+                        DaemonErrorResponse(event: "error", workspace: name, error: errorBody(error, command: "daemon")),
+                        to: .standardError,
+                        pretty: false
+                    )
+                } else { writeText("Error switching to '\(name)': \(error)", to: .standardError) }
             }
         }
         let hotkeys = HotkeyManager { name in switchCoordinator.request(name) }
-
         let modifierNames = config.general.modifierNames
         let modifierLabel = modifierNames.joined(separator: "+")
-        var registered: [String] = []
-        for ws in config.workspaces {
-            guard let key = ws.hotkey else { continue }
-            if hotkeys.register(workspace: ws.name, key: key, modifierNames: modifierNames) {
-                registered.append("\(modifierLabel)+\(key) -> \(ws.name)")
+        var registered: [DaemonHotkeyResponse] = []
+        for workspace in config.workspaces {
+            guard let key = workspace.hotkey else { continue }
+            if hotkeys.register(workspace: workspace.name, key: key, modifierNames: modifierNames) {
+                registered.append(DaemonHotkeyResponse(workspace: workspace.name, shortcut: "\(modifierLabel)+\(key)"))
             }
         }
-
-        if registered.isEmpty {
-            print("No workspaces have a hotkey configured. Add \"hotkey\": \"1\" etc. to a workspace and restart.")
-        } else {
+        if jsonRequested { try writeJSON(DaemonReadyResponse(event: "ready", hotkeys: registered), pretty: false) }
+        else if registered.isEmpty { print("No workspaces have a hotkey configured. Add a hotkey in EDN and restart.") }
+        else {
             print("edn daemon running. Hotkeys:")
-            for line in registered { print("  \(line)") }
+            for hotkey in registered { print("  \(hotkey.shortcut) -> \(hotkey.workspace)") }
         }
         hotkeys.run()
-    } catch {
-        print("Error: \(error)")
-        exit(1)
-    }
+    } catch { fail(error, command: command, json: jsonRequested) }
 
 default:
+    let error = CLIError.invalidValue("Unknown command '\(command)'.")
+    if jsonRequested { fail(error, command: command, json: true) }
     printUsage()
     exit(1)
 }
