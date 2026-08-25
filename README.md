@@ -4,6 +4,22 @@ EDN (pronounced “Eden”) is a fast, config-driven workspace manager for macOS
 
 EDN uses app hiding and showing rather than Mission Control Spaces, so switching is immediate and animation-free. It does not calculate layouts, silently assign apps, or isolate individual windows of the same app.
 
+**[Watch the 11-second demo →](docs/assets/demo.mp4)**
+
+## The flow
+
+**1. Start empty.** Create a workspace without inheriting whatever happens to be open.
+
+<img src="docs/assets/workspace-empty.jpg" alt="A new empty EDN workspace" width="100%">
+
+**2. Choose the apps.** Membership is explicit and searchable.
+
+<img src="docs/assets/app-picker.jpg" alt="EDN's application picker" width="100%">
+
+**3. Give it a shortcut and arrange it.** The numbered menu-bar indicator shows where you are. Switch away and EDN remembers the layout exactly as you left it.
+
+<img src="docs/assets/workspace-ready.jpg" alt="A populated EDN workspace with its shortcut and active numbered indicator" width="100%">
+
 ## Install
 
 EDN is currently a technical preview. Beta builds are available from [GitHub Releases](https://github.com/jacobalarcon/edn/releases), but they are not yet notarized by Apple.
