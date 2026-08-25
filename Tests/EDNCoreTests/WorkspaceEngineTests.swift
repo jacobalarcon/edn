@@ -44,6 +44,51 @@ struct WorkspaceEngineTests {
         #expect(windows.hiddenBundleIDs.isEmpty)
     }
 
+    @Test("A manually launched active-workspace app gets only its active layout restored")
+    func launchedActiveMemberRestoresLayout() throws {
+        let fixture = try EngineFixture(activeWorkspace: "target")
+        defer { fixture.remove() }
+        let desired = Frame(x: 40, y: 50, w: 900, h: 700)
+        var state = try fixture.store.read()
+        state.setWindowFrames([desired], workspace: "target", key: "app.target")
+        try state.save(to: fixture.store.url)
+        let window = FakeManagedWindow(frame: Frame(x: 0, y: 0, w: 400, h: 300))
+        let windows = FakeWindowManager(
+            activations: ["app.target": .activated],
+            windows: ["app.target": [window]]
+        )
+        let engine = WorkspaceEngine(
+            config: fixture.config,
+            stateStore: fixture.store,
+            windowManager: windows
+        )
+
+        let results = try engine.restoreLaunchedApplication(bundleID: "app.target")
+
+        #expect(results.count == 1)
+        #expect(window.appliedFrames == [desired])
+        #expect(windows.hiddenBundleIDs.isEmpty)
+        #expect(try fixture.store.read().activeWorkspace == "target")
+    }
+
+    @Test("A launched app outside the active workspace is left alone")
+    func launchedInactiveMemberIsIgnored() throws {
+        let fixture = try EngineFixture(activeWorkspace: "target")
+        defer { fixture.remove() }
+        let windows = FakeWindowManager(activations: ["app.old": .activated])
+        let engine = WorkspaceEngine(
+            config: fixture.config,
+            stateStore: fixture.store,
+            windowManager: windows
+        )
+
+        let results = try engine.restoreLaunchedApplication(bundleID: "app.old")
+
+        #expect(results.isEmpty)
+        #expect(windows.activationBundleIDs.isEmpty)
+        #expect(windows.hiddenBundleIDs.isEmpty)
+    }
+
     @Test("Saving an unknown workspace is an error")
     func unknownSnapshotFails() throws {
         let fixture = try EngineFixture(activeWorkspace: nil)

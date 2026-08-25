@@ -1,11 +1,13 @@
 import AppKit
 import EDNCore
 import Foundation
+import OSLog
 import ServiceManagement
 
 private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, WorkspaceManagerHost {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let workspaceIndicator = WorkspaceIndicatorView()
+    private let logger = Logger(subsystem: "com.jacobalarcon.edn", category: "lifecycle")
     private let switchQueue = DispatchQueue(label: "edn.menu.switch")
     private let discoveryQueue = DispatchQueue(label: "edn.menu.discovery", qos: .userInitiated)
     private var hotkeys: HotkeyManager?
@@ -14,6 +16,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var hotkeysSuspended = false
     private var didOfferAccessibilityThisLaunch = false
     private var accessibilityPollTimer: Timer?
+    private var resumeWorkItem: DispatchWorkItem?
+    /// Bundle IDs launched by an in-flight EDN switch. Their workspace-switch replay
+    /// already handled them, so the subsequent NSWorkspace launch notification is ignored.
+    /// Access only from switchQueue.
+    private var launchesHandledBySwitch: [String: Date] = [:]
     private var manager: WorkspaceManagerWindowController?
     private var cachedInstalledApplications: [InstalledApplication]?
     private var lastSwitchIssues: [(workspace: String, bundleId: String, issue: SwitchIssue)] = []
@@ -29,6 +36,26 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
+
+        let workspaceNotifications = NSWorkspace.shared.notificationCenter
+        workspaceNotifications.addObserver(
+            self,
+            selector: #selector(workspaceSessionResumed(_:)),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+        workspaceNotifications.addObserver(
+            self,
+            selector: #selector(applicationDidLaunch(_:)),
+            name: NSWorkspace.didLaunchApplicationNotification,
+            object: nil
+        )
+        workspaceNotifications.addObserver(
+            self,
+            selector: #selector(workspaceSessionResumed(_:)),
+            name: NSWorkspace.sessionDidBecomeActiveNotification,
+            object: nil
+        )
 
         reloadHotkeysIfNeeded(force: true)
         refreshStatusTitle()
@@ -202,9 +229,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private func performSwitch(to name: String) {
         guard AXWindowManager.isTrusted else {
+            logger.notice("Switch to \(name, privacy: .public) blocked: Accessibility permission missing")
             offerAccessibilitySetupIfNeeded(force: true)
             return
         }
+        logger.debug("Switch requested: \(name, privacy: .public)")
         switchCoordinator.request(name)
     }
 
@@ -212,7 +241,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         do {
             let engine = WorkspaceEngine(config: try Config.load())
             let results = try engine.switchTo(name)
+            for result in results where result.activation == .launched {
+                launchesHandledBySwitch[result.bundleId] = Date()
+            }
             DispatchQueue.main.async { [weak self] in
+                self?.logger.debug("Switch completed: \(name, privacy: .public)")
                 self?.lastSwitchIssues = results.compactMap { result in
                     result.issue.map { (name, result.bundleId, $0) }
                 }
@@ -464,6 +497,58 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         accessibilityPollTimer = nil
         reloadHotkeysIfNeeded(force: true)
         refreshStatusTitle()
+    }
+
+    @objc private func workspaceSessionResumed(_ notification: Notification) {
+        // Wake and unlock notifications can arrive back-to-back. Coalesce them, then
+        // rebuild Carbon registrations after the user session is fully active.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.resumeWorkItem?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.logger.info("Session resumed; refreshing global hotkeys")
+                self.reloadHotkeysIfNeeded(force: true)
+                self.refreshStatusTitle()
+            }
+            self.resumeWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+        }
+    }
+
+    @objc private func applicationDidLaunch(_ notification: Notification) {
+        guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                as? NSRunningApplication,
+              let bundleID = application.bundleIdentifier,
+              bundleID != Bundle.main.bundleIdentifier else { return }
+
+        switchQueue.async { [weak self] in
+            guard let self else { return }
+            if let handledAt = self.launchesHandledBySwitch.removeValue(forKey: bundleID),
+               Date().timeIntervalSince(handledAt) < 5 {
+                    self.logger.debug("Launch already handled by workspace switch: \(bundleID, privacy: .public)")
+                    return
+            }
+            do {
+                let engine = WorkspaceEngine(config: try Config.load())
+                let results = try engine.restoreLaunchedApplication(bundleID: bundleID)
+                guard !results.isEmpty else { return }
+                self.logger.info("Restored launched app in active workspace: \(bundleID, privacy: .public)")
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, let active = try? WorkspaceStateStore().read().activeWorkspace else { return }
+                    self.lastSwitchIssues = results.compactMap { result in
+                        result.issue.map { (active, result.bundleId, $0) }
+                    }
+                    self.refreshStatusTitle()
+                }
+            } catch EngineError.notTrusted {
+                DispatchQueue.main.async { [weak self] in
+                    self?.offerAccessibilitySetupIfNeeded(force: true)
+                }
+            } catch {
+                self.logger.error("Could not restore launched app \(bundleID, privacy: .public): \(String(describing: error), privacy: .public)")
+            }
+        }
     }
 
     private func switchIssueText(bundleId: String, issue: SwitchIssue) -> String {

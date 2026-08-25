@@ -132,6 +132,28 @@ public final class WorkspaceEngine {
         }
     }
 
+    /// Restores only a newly launched app when it belongs to the active workspace.
+    /// This is intentionally not a workspace switch: no outgoing snapshot, no hiding,
+    /// no active-workspace mutation, and no inference when the app isn't a member.
+    @discardableResult
+    public func restoreLaunchedApplication(bundleID: String) throws -> [SwitchResult] {
+        guard windowManager.isTrusted else { throw EngineError.notTrusted }
+        let state = try stateStore.read()
+        guard let activeName = state.activeWorkspace,
+              let workspace = config.workspaces.first(where: { $0.name == activeName }) else {
+            return []
+        }
+        let matchingApps = workspace.apps.filter { $0.bundleId == bundleID }
+        guard !matchingApps.isEmpty else { return [] }
+
+        windowManager.beginSwitch()
+        return matchingApps.map { app in
+            let desiredFrames = state.windowFrames(workspace: activeName, key: app.stateKey)
+                ?? app.configuredFrames
+            return presentApp(app, desiredFrames: desiredFrames, workspaceName: activeName)
+        }
+    }
+
     /// Snapshots current frames for the given workspace's apps into state.
     @discardableResult
     public func snapshot(workspace name: String) throws -> SnapshotResult {
