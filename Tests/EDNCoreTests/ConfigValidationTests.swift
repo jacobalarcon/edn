@@ -4,6 +4,32 @@ import Testing
 
 @Suite("Configuration validation")
 struct ConfigValidationTests {
+    @Test("A missing config is a valid empty first-run state")
+    func missingConfigLoadsEmpty() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("edn-missing-config-\(UUID().uuidString)")
+        let url = directory.appendingPathComponent("config.json")
+
+        let config = try Config.load(from: url)
+
+        #expect(config == Config())
+        #expect(!FileManager.default.fileExists(atPath: url.path))
+    }
+
+    @Test("The first config transaction creates the missing file")
+    func firstTransactionCreatesConfig() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("edn-first-config-\(UUID().uuidString)")
+        let url = directory.appendingPathComponent("config.json")
+
+        try ConfigStore(url: url).update { config in
+            config.workspaces.append(WorkspaceConfig(name: "First", number: 1))
+        }
+
+        #expect(FileManager.default.fileExists(atPath: url.path))
+        #expect(try Config.load(from: url).workspaces.map(\.name) == ["First"])
+    }
+
     @Test("Accepts distinct workspaces and combined modifiers")
     func acceptsValidConfig() throws {
         let config = Config(

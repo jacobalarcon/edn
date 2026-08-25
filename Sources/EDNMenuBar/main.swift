@@ -33,6 +33,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         reloadHotkeysIfNeeded(force: true)
         refreshStatusTitle()
 
+        let needsFirstWorkspace = (try? Config.load().workspaces.isEmpty) == true
+            && !FileManager.default.fileExists(atPath: Config.defaultPath.path)
+        if needsFirstWorkspace {
+            DispatchQueue.main.async { [weak self] in
+                self?.presentManager(beginningCreate: false)
+            }
+        }
         if !AXWindowManager.isTrusted {
             DispatchQueue.main.async { [weak self] in
                 self?.offerAccessibilitySetupIfNeeded()
@@ -258,7 +265,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     @objc private func openConfiguration() {
         do {
             if !FileManager.default.fileExists(atPath: Config.defaultPath.path) {
-                try Config.example().save()
+                try Config().save()
             }
             NSWorkspace.shared.open(Config.defaultPath)
         } catch {

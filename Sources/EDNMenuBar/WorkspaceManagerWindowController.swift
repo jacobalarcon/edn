@@ -357,6 +357,9 @@ final class WorkspaceManagerWindowController: NSWindowController,
         guard let workspace = selectedWorkspace else {
             detailStack.isHidden = true
             placeholderLabel.isHidden = false
+            placeholderLabel.stringValue = workspaces.isEmpty
+                ? "Create your first workspace with +."
+                : "No workspace selected."
             appTable.reloadData()
             return
         }

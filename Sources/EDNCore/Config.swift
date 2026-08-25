@@ -97,6 +97,11 @@ public struct Config: Codable, Equatable {
            url.standardizedFileURL == builtInDefaultPath.standardizedFileURL {
             _ = try StorageMigration.migrateConfigIfNeeded()
         }
+        // A missing config is the normal first-run state. Keep it in memory until the
+        // user creates a workspace; the first authoring transaction writes the file.
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return Config()
+        }
         return try ConfigCache.shared.load(from: url) {
             let data = try Data(contentsOf: url)
             let config = try JSONDecoder().decode(Config.self, from: data)

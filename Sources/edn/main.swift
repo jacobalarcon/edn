@@ -21,7 +21,7 @@ func printUsage() {
     edn - instant, config-driven workspaces with remembered window layouts for macOS
 
     Usage:
-      edn init                   Write an example config to ~/.config/edn/config.json
+      edn init                   Create an empty config at ~/.config/edn/config.json
       edn list                   List configured workspaces
       edn windows [--json]       Show visible apps, windows, frames, and displays
       edn create <name> [options]
@@ -120,8 +120,8 @@ case "init":
         print("Config already exists at \(path.path)")
     } else {
         do {
-            try Config.example().save(to: path)
-            print("Wrote example config to \(path.path)")
+            try Config().save(to: path)
+            print("Created empty config at \(path.path)")
         } catch {
             print("Failed to write config: \(error)")
             exit(1)
