@@ -11,9 +11,12 @@ The first public release will be available from [GitHub Releases](https://github
 For a local development build:
 
 ```sh
+scripts/setup-local-signing.sh
 scripts/build-app.sh
 scripts/install-local.sh
 ```
+
+The one-time local signing setup gives rebuilds a persistent macOS identity, so Accessibility approval survives development updates. It creates a self-signed certificate in your login keychain trusted only for code signing; it does not make the app suitable for public distribution.
 
 The packaged CLI lives at `EDN.app/Contents/Helpers/edn`. A future Homebrew Cask will expose it automatically alongside the app.
 

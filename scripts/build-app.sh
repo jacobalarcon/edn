@@ -5,7 +5,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 VERSION="${EDN_VERSION:-0.1.0}"
 BUILD_NUMBER="${EDN_BUILD_NUMBER:-1}"
-IDENTITY="${EDN_CODE_SIGN_IDENTITY:--}"
+if [[ -n "${EDN_CODE_SIGN_IDENTITY:-}" ]]; then
+    IDENTITY="$EDN_CODE_SIGN_IDENTITY"
+elif security find-identity -v -p codesigning 2>/dev/null | grep -Fq '"EDN Local Development"'; then
+    IDENTITY="EDN Local Development"
+else
+    IDENTITY="-"
+fi
 APP_DIR="$ROOT_DIR/dist/EDN.app"
 
 build_arch() {
