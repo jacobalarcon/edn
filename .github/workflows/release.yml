@@ -90,10 +90,11 @@ jobs:
             --title "EDN $VERSION"
           )
           if [[ "$VERSION" == *-beta.* ]]; then
+            sed "s/{{VERSION}}/$VERSION/g" Packaging/BetaReleaseNotes.md > "$RUNNER_TEMP/beta-release-notes.md"
             RELEASE_ARGS+=(
               --prerelease
               --latest=false
-              --notes-file Packaging/BetaReleaseNotes.md
+              --notes-file "$RUNNER_TEMP/beta-release-notes.md"
             )
           else
             RELEASE_ARGS+=(--generate-notes)

@@ -2,6 +2,10 @@
 
 EDN is fast and usable, but this beta is ad-hoc signed and has not been notarized by Apple.
 
+**[Download EDN for macOS (.dmg)](https://github.com/jacobalarcon/edn/releases/download/v{{VERSION}}/EDN-{{VERSION}}.dmg)**
+
+Requires macOS 13 or newer. The download is universal for Apple Silicon and Intel Macs.
+
 ### What is ready
 
 - Instant, animation-free switching between explicit app workspaces
@@ -10,8 +14,8 @@ EDN is fast and usable, but this beta is ad-hoc signed and has not been notarize
 - Configurable app and window focus shortcuts
 - Plain JSON configuration and a scriptable CLI with structured output
 
-1. Download and open the `.dmg` asset (not GitHub's “Source code” archives).
-2. Drag `EDN.app` to Applications and try to open it once.
+1. Open the downloaded disk image and drag EDN to Applications.
+2. Open EDN from Applications. Dragging it installs the app but does not launch it.
 3. Open **System Settings → Privacy & Security**, scroll to **Security**, click **Open Anyway**, then confirm **Open**.
 4. Follow EDN's prompt to grant Accessibility access.
 

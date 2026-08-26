@@ -7,7 +7,12 @@ on:
 
 jobs:
   test:
-    runs-on: macos-15
+    name: macOS ${{ matrix.macos }}
+    strategy:
+      fail-fast: false
+      matrix:
+        macos: [15, 26]
+    runs-on: macos-${{ matrix.macos }}
     steps:
       - uses: actions/checkout@v7
       - run: swift test

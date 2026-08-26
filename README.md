@@ -8,6 +8,8 @@ EDN uses app hiding and showing rather than Mission Control Spaces, so switching
 
 Optional global shortcuts can move focus through the running apps or live windows in the active workspace. They follow explicit app order, include every standard window, and never launch apps, move windows, or change workspaces.
 
+**[Download EDN for macOS →](https://github.com/jacobalarcon/edn/releases/download/v0.1.0-beta.3/EDN-0.1.0-beta.3.dmg)** · macOS 13+ · Apple Silicon and Intel
+
 **[Watch the 11-second demo →](docs/assets/demo.mp4)**
 
 ## The flow
@@ -26,16 +28,18 @@ Optional global shortcuts can move focus through the running apps or live window
 
 ## Install
 
-EDN requires macOS 13 or newer. It is currently a technical preview: beta builds are available from [GitHub Releases](https://github.com/jacobalarcon/edn/releases), but they are not yet notarized by Apple.
+**[Download EDN for macOS (.dmg)](https://github.com/jacobalarcon/edn/releases/download/v0.1.0-beta.3/EDN-0.1.0-beta.3.dmg)**
 
-To try a beta:
+Requires macOS 13 or newer. The download is universal for Apple Silicon and Intel Macs.
 
-1. Download and open the EDN disk image (`.dmg`).
-2. Drag `EDN.app` to Applications and try to open it once.
-3. When macOS blocks it, open **System Settings → Privacy & Security**, scroll to **Security**, click **Open Anyway**, then confirm **Open**. This is [Apple's supported override](https://support.apple.com/guide/mac-help/apple-cant-check-app-for-malicious-software-mchleab3a043/mac); never disable Gatekeeper globally.
-4. EDN will then guide you through granting Accessibility access, which macOS requires to read and position windows.
+1. Open the downloaded disk image and drag EDN to Applications.
+2. Open EDN from Applications. The copy is the installation; dragging it does not launch it automatically.
+3. macOS will block this technical preview because it is not yet notarized. Open **System Settings → Privacy & Security**, scroll to **Security**, click **Open Anyway**, then confirm **Open**.
+4. Follow EDN's prompt to grant Accessibility access, which macOS requires to read and position windows.
 
-Because beta builds use an ad-hoc signature, macOS may ask for Accessibility approval again after an update. A stable release requires Developer ID signing and notarization and will not carry this limitation.
+Step 3 is [Apple's supported override](https://support.apple.com/guide/mac-help/apple-cant-check-app-for-malicious-software-mchleab3a043/mac); never disable Gatekeeper globally. Beta builds use an ad-hoc signature, so macOS may request Accessibility approval again after an update. Developer ID signing and notarization will remove this friction from stable releases.
+
+[View all releases and checksums →](https://github.com/jacobalarcon/edn/releases)
 
 For a local development build:
 
@@ -115,7 +119,7 @@ GitHub’s release workflow expects these repository secrets:
 - `APPLE_TEAM_ID`
 - `RELEASE_KEYCHAIN_PASSWORD`
 
-Pushing a `v*` tag builds a universal app, signs it with Developer ID, notarizes it with Apple, staples the ticket, and publishes the ZIP and SHA-256 checksum.
+A beta tag builds and publishes an ad-hoc-signed universal app. A stable `v*` tag requires Developer ID credentials, notarizes the app and disk image with Apple, staples the tickets, and publishes the DMG, ZIP, and SHA-256 checksums.
 
 ## License
 
