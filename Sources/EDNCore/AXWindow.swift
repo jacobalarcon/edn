@@ -102,12 +102,17 @@ public struct AXWindow {
     /// Applies a frame and reports what actually stuck. Order matters: size is set
     /// before position, because macOS clamps a window's position to fit the screen --
     /// moving first (while still the old, larger size) can cause the position to be
-    /// rejected or clamped. Size is set again after, since some apps only honor a
-    /// resize once they're at their final position.
+    /// rejected or clamped. Some apps only honor a resize once they're at their final
+    /// position, so the size is set a second time -- but only for the windows that
+    /// actually need it. The read-back that reports what stuck doubles as the test for
+    /// that, so the common case (size accepted immediately) now costs three round trips
+    /// instead of five, and the stubborn case still costs exactly what it did before.
     @discardableResult
     public func setFrame(_ frame: Frame) -> FrameApplyResult {
         _ = Self.setSize(element, kAXSizeAttribute, frame.size)
         _ = Self.setPoint(element, kAXPositionAttribute, frame.point)
+        let settled = FrameApplyResult(requested: frame, actual: Self.liveFrame(element))
+        guard !settled.sizeMatched else { return settled }
         _ = Self.setSize(element, kAXSizeAttribute, frame.size)
         return FrameApplyResult(requested: frame, actual: Self.liveFrame(element))
     }
@@ -123,24 +128,51 @@ public struct AXWindow {
         ) == .success
     }
 
+    /// Reads several attributes in a single IPC round trip. AX charges per round trip,
+    /// not per attribute, so one call for five attributes costs roughly what one
+    /// individual read costs -- and an app like Chrome answers in milliseconds, not
+    /// microseconds. Unset or unsupported attributes come back as an AXValue wrapping
+    /// an AXError rather than as a gap in the array; those are normalized to nil so
+    /// callers see exactly what an individual read would have given them.
+    static func attributes(_ element: AXUIElement, _ names: [String]) -> [CFTypeRef?] {
+        var raw: CFArray?
+        EDNInstrumentation.axReadBatch(names)
+        let err = AXUIElementCopyMultipleAttributeValues(
+            element,
+            names as CFArray,
+            AXCopyMultipleAttributeOptions(),
+            &raw
+        )
+        guard err == .success,
+              let values = raw as? [CFTypeRef],
+              values.count == names.count else {
+            return Array(repeating: nil, count: names.count)
+        }
+        return values.map { value in
+            guard CFGetTypeID(value) == AXValueGetTypeID(),
+                  AXValueGetType(value as! AXValue) == .axError else { return value }
+            return nil
+        }
+    }
+
+    static func unwrapPoint(_ value: CFTypeRef?) -> CGPoint? {
+        guard let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        var point = CGPoint.zero
+        guard AXValueGetValue(value as! AXValue, .cgPoint, &point) else { return nil }
+        return point
+    }
+
+    static func unwrapSize(_ value: CFTypeRef?) -> CGSize? {
+        guard let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        var size = CGSize.zero
+        guard AXValueGetValue(value as! AXValue, .cgSize, &size) else { return nil }
+        return size
+    }
+
     static func liveFrame(_ element: AXUIElement) -> Frame? {
-        guard let pos = Self.getPoint(element, kAXPositionAttribute),
-              let size = Self.getSize(element, kAXSizeAttribute) else { return nil }
+        let values = attributes(element, [kAXPositionAttribute as String, kAXSizeAttribute as String])
+        guard let pos = unwrapPoint(values[0]), let size = unwrapSize(values[1]) else { return nil }
         return Frame(point: pos, size: size)
-    }
-
-    static func getPoint(_ element: AXUIElement, _ attr: String) -> CGPoint? {
-        guard let v = axValue(element, attr) else { return nil }
-        var p = CGPoint.zero
-        guard AXValueGetValue(v, .cgPoint, &p) else { return nil }
-        return p
-    }
-
-    static func getSize(_ element: AXUIElement, _ attr: String) -> CGSize? {
-        guard let v = axValue(element, attr) else { return nil }
-        var s = CGSize.zero
-        guard AXValueGetValue(v, .cgSize, &s) else { return nil }
-        return s
     }
 
     static func getBool(_ element: AXUIElement, _ attr: String) -> Bool? {
@@ -163,15 +195,6 @@ public struct AXWindow {
         guard let v = AXValueCreate(.cgSize, &s) else { return false }
         EDNInstrumentation.axWrite(attr)
         return AXUIElementSetAttributeValue(element, attr as CFString, v) == .success
-    }
-
-    static func axValue(_ element: AXUIElement, _ attr: String) -> AXValue? {
-        var ref: CFTypeRef?
-        EDNInstrumentation.axRead(attr)
-        let err = AXUIElementCopyAttributeValue(element, attr as CFString, &ref)
-        guard err == .success, let ref = ref else { return nil }
-        guard CFGetTypeID(ref) == AXValueGetTypeID() else { return nil }
-        return (ref as! AXValue)
     }
 }
 
@@ -355,17 +378,24 @@ public enum AXWindowManager {
         let err = AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef)
         guard err == .success, let raw = windowsRef as? [AXUIElement] else { return [] }
 
+        // Every attribute the engine materializes for a window, fetched in one round
+        // trip per window rather than five. This is the hot path: it runs for each app
+        // of the outgoing workspace (snapshot) and each app of the incoming one (replay).
+        let wanted = [
+            kAXTitleAttribute as String,
+            kAXSubroleAttribute as String,
+            kAXMinimizedAttribute as String,
+            kAXPositionAttribute as String,
+            kAXSizeAttribute as String
+        ]
         let wrapped = raw.map { win -> AXWindow in
-            var titleRef: CFTypeRef?
-            EDNInstrumentation.axRead(kAXTitleAttribute)
-            AXUIElementCopyAttributeValue(win, kAXTitleAttribute as CFString, &titleRef)
-            let title = (titleRef as? String) ?? ""
-            var subroleRef: CFTypeRef?
-            EDNInstrumentation.axRead(kAXSubroleAttribute)
-            AXUIElementCopyAttributeValue(win, kAXSubroleAttribute as CFString, &subroleRef)
-            let subrole = (subroleRef as? String) ?? ""
-            let isMinimized = AXWindow.getBool(win, kAXMinimizedAttribute) ?? false
-            let frame = AXWindow.liveFrame(win)
+            let values = AXWindow.attributes(win, wanted)
+            let title = (values[0] as? String) ?? ""
+            let subrole = (values[1] as? String) ?? ""
+            let isMinimized = (values[2] as? Bool) ?? false
+            let frame = AXWindow.unwrapPoint(values[3]).flatMap { point in
+                AXWindow.unwrapSize(values[4]).map { Frame(point: point, size: $0) }
+            }
             return AXWindow(element: win, title: title, subrole: subrole, frame: frame, isMinimized: isMinimized)
         }
 

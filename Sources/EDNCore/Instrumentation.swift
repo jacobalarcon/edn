@@ -40,6 +40,17 @@ public enum EDNInstrumentation {
         increment("ax.read.\(attribute)")
     }
 
+    /// One batched `AXUIElementCopyMultipleAttributeValues` call: a single IPC round
+    /// trip that returns several attributes. Counted as one `ax.read` (round trips are
+    /// what cost time) while still crediting each attribute it carried.
+    static func axReadBatch(_ attributes: [String]) {
+        guard countingEnabled else { return }
+        increment("ax.read")
+        for attribute in attributes {
+            increment("ax.read.\(attribute)")
+        }
+    }
+
     static func axWrite(_ attribute: String) {
         guard countingEnabled else { return }
         increment("ax.write")
