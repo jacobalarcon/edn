@@ -423,11 +423,11 @@ struct WorkspaceEngineTests {
 
         #expect(manager.beginSwitchCount == 1)
         #expect(manager.activationBundleIDs == ["app.new-one", "app.new-two", "app.shared"])
-        #expect(manager.waitedBundleIDs == ["app.new-one", "app.new-two"])
+        #expect(manager.waitedBundleIDs.isEmpty)
         // "app.shared" belongs to both workspaces, so it must be captured first, before
         // the target's frames are applied. The non-shared apps ("app.old-one",
         // "app.old-two") are captured afterward, right before they're hidden.
-        #expect(manager.queriedBundleIDs == ["app.shared", "app.old-one", "app.old-two"])
+        #expect(manager.queriedBundleIDs == ["app.shared", "app.new-one", "app.new-two", "app.old-one", "app.old-two"])
         #expect(Set(manager.hiddenBundleIDs) == ["app.old-one", "app.old-two"])
         #expect(newA.appliedFrames == [Frame(x: 10, y: 10, w: 500, h: 500)])
         #expect(newB.appliedFrames == [Frame(x: 520, y: 10, w: 500, h: 500)])
@@ -437,6 +437,109 @@ struct WorkspaceEngineTests {
         #expect(newA.frameAccessCount == 1)
         #expect(newB.frameAccessCount == 1)
         #expect(newC.frameAccessCount == 1)
+    }
+
+    @Test("A cold app does not delay replaying a ready sibling")
+    func coldAppDoesNotDelayReadySibling() throws {
+        let fixture = try EngineFixture(activeWorkspace: "old")
+        defer { fixture.remove() }
+        let config = Config(workspaces: [
+            WorkspaceConfig(name: "old", number: 1, apps: [AppConfig(bundleId: "app.old")]),
+            WorkspaceConfig(name: "target", number: 2, apps: [
+                AppConfig(bundleId: "app.slow"),
+                AppConfig(bundleId: "app.ready")
+            ])
+        ])
+        let slowFrame = Frame(x: 10, y: 10, w: 500, h: 700)
+        let readyFrame = Frame(x: 520, y: 10, w: 500, h: 700)
+        try fixture.store.update { state in
+            state.setWindowFrames([slowFrame], workspace: "target", key: "app.slow")
+            state.setWindowFrames([readyFrame], workspace: "target", key: "app.ready")
+        }
+        let events = EventLog()
+        let slowWindow = FakeManagedWindow(title: "slow", frame: Frame(x: 0, y: 0, w: 100, h: 100), eventLog: events)
+        let readyWindow = FakeManagedWindow(title: "ready", frame: Frame(x: 0, y: 0, w: 100, h: 100), eventLog: events)
+        let manager = FakeWindowManager(
+            activations: ["app.slow": .launched, "app.ready": .activated],
+            windows: ["app.slow": [slowWindow], "app.ready": [readyWindow]],
+            initiallyNotReady: ["app.slow"],
+            asynchronousLaunches: ["app.slow"],
+            eventLog: events
+        )
+        let engine = WorkspaceEngine(config: config, stateStore: fixture.store, windowManager: manager)
+
+        let results = try engine.switchTo("target")
+
+        #expect(results.map(\.bundleId) == ["app.slow", "app.ready"])
+        #expect(manager.activationBundleIDs == ["app.slow", "app.ready", "app.ready"])
+        #expect(manager.waitedBatches == [["app.slow"]])
+        guard let readyApply = events.events.firstIndex(of: "applyFrame:ready"),
+              let hide = events.events.firstIndex(of: "hide:app.old"),
+              let wait = events.events.firstIndex(of: "waitBatch:app.slow"),
+              let slowApply = events.events.firstIndex(of: "applyFrame:slow") else {
+            Issue.record("expected phased switch events missing from \(events.events)")
+            return
+        }
+        #expect(readyApply < hide)
+        #expect(hide < wait)
+        #expect(wait < slowApply)
+        #expect(events.events.firstIndex(of: "activate:app.ready")! < readyApply)
+    }
+
+    @Test("Cold apps share one readiness deadline")
+    func coldAppsShareReadinessDeadline() throws {
+        let fixture = try EngineFixture(activeWorkspace: nil)
+        defer { fixture.remove() }
+        let config = Config(workspaces: [
+            WorkspaceConfig(name: "target", number: 1, apps: [
+                AppConfig(bundleId: "app.one"),
+                AppConfig(bundleId: "app.two")
+            ])
+        ])
+        let desired = Frame(x: 10, y: 10, w: 500, h: 700)
+        try fixture.store.update { state in
+            state.setWindowFrames([desired], workspace: "target", key: "app.one")
+            state.setWindowFrames([desired], workspace: "target", key: "app.two")
+        }
+        let manager = FakeWindowManager(
+            activations: ["app.one": .launched, "app.two": .launched],
+            windows: [
+                "app.one": [FakeManagedWindow(frame: desired)],
+                "app.two": [FakeManagedWindow(frame: desired)]
+            ],
+            initiallyNotReady: ["app.one", "app.two"]
+        )
+        let engine = WorkspaceEngine(config: config, stateStore: fixture.store, windowManager: manager)
+
+        _ = try engine.switchTo("target")
+
+        #expect(manager.waitedBatches == [["app.one", "app.two"]])
+    }
+
+    @Test("A cold target that never becomes available preserves the old workspace")
+    func unavailableColdTargetPreservesOldWorkspace() throws {
+        let fixture = try EngineFixture(activeWorkspace: "old")
+        defer { fixture.remove() }
+        let desired = Frame(x: 10, y: 10, w: 500, h: 700)
+        try fixture.store.update { state in
+            state.setWindowFrames([desired], workspace: "target", key: "app.target")
+        }
+        let manager = FakeWindowManager(
+            activations: ["app.target": .launchTimedOut],
+            windows: [:],
+            initiallyNotReady: ["app.target"],
+            asynchronousLaunches: ["app.target"]
+        )
+        let engine = WorkspaceEngine(config: fixture.config, stateStore: fixture.store, windowManager: manager)
+
+        do {
+            _ = try engine.switchTo("target")
+            Issue.record("Expected activation failure")
+        } catch EngineError.workspaceActivationFailed("target") {}
+
+        #expect(try fixture.store.read().activeWorkspace == "old")
+        #expect(manager.hiddenBundleIDs.isEmpty)
+        #expect(manager.waitedBatches == [["app.target"]])
     }
 
     @Test("Non-shared outgoing app's window read happens after the target's frames are applied")
@@ -519,19 +622,26 @@ private final class FakeWindowManager: WindowManaging {
     var activations: [String: AppActivationResult]
     var managedWindows: [String: [any ManagedWindow]]
     private let eventLog: EventLog?
+    private let initiallyNotReady: Set<String>
+    private let asynchronousLaunches: Set<String>
     private(set) var beginSwitchCount = 0
     private(set) var hiddenBundleIDs: [String] = []
     private(set) var activationBundleIDs: [String] = []
     private(set) var queriedBundleIDs: [String] = []
     private(set) var waitedBundleIDs: [String] = []
+    private(set) var waitedBatches: [[String]] = []
 
     init(
         activations: [String: AppActivationResult] = [:],
         windows: [String: [any ManagedWindow]] = [:],
+        initiallyNotReady: Set<String> = [],
+        asynchronousLaunches: Set<String> = [],
         eventLog: EventLog? = nil
     ) {
         self.activations = activations
         managedWindows = windows
+        self.initiallyNotReady = initiallyNotReady
+        self.asynchronousLaunches = asynchronousLaunches
         self.eventLog = eventLog
     }
 
@@ -541,12 +651,17 @@ private final class FakeWindowManager: WindowManaging {
     func windows(forBundleID bundleID: String) -> [any ManagedWindow] {
         queriedBundleIDs.append(bundleID)
         eventLog?.record("query:\(bundleID)")
-        return managedWindows[bundleID] ?? []
+        return initiallyNotReady.contains(bundleID) ? [] : (managedWindows[bundleID] ?? [])
     }
     func waitForWindow(bundleID: String, timeout: TimeInterval) -> [any ManagedWindow] {
         waitedBundleIDs.append(bundleID)
         eventLog?.record("wait:\(bundleID)")
         return managedWindows[bundleID] ?? []
+    }
+    func waitForWindows(bundleIDs: [String], timeout: TimeInterval) -> [String: [any ManagedWindow]] {
+        waitedBatches.append(bundleIDs)
+        eventLog?.record("waitBatch:\(bundleIDs.joined(separator: ","))")
+        return Dictionary(uniqueKeysWithValues: bundleIDs.map { ($0, managedWindows[$0] ?? []) })
     }
     func hide(bundleID: String) -> AppHideResult {
         hiddenBundleIDs.append(bundleID)
@@ -557,6 +672,17 @@ private final class FakeWindowManager: WindowManaging {
         activationBundleIDs.append(bundleID)
         eventLog?.record("activate:\(bundleID)")
         return activations[bundleID] ?? .applicationNotFound
+    }
+    func beginActivation(bundleID: String) -> AppActivationRequest {
+        guard asynchronousLaunches.contains(bundleID) else {
+            return .completed(activate(bundleID: bundleID, timeout: 5))
+        }
+        activationBundleIDs.append(bundleID)
+        eventLog?.record("activate:\(bundleID)")
+        return .pending(PendingAppActivation { [activations, eventLog] _ in
+            eventLog?.record("resolve:\(bundleID)")
+            return activations[bundleID] ?? .launchTimedOut
+        })
     }
 }
 

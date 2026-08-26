@@ -357,47 +357,159 @@ public final class WorkspaceEngine {
                     state.windowFrames(workspace: name, key: app.stateKey) ?? app.configuredFrames
                 }
 
-                // Keep app presentation ordered. Besides making focus deterministic, this
-                // avoids concurrent AppKit/AX access and shared-memory races. A future
-                // prepare-hidden/reveal pipeline can remove visual stagger without making
-                // activation order nondeterministic.
-                let finalResults = target.apps.enumerated().map { index, app in
-                    presentApp(
-                        app,
-                        desiredFrames: desiredFramesByApp[index],
-                        workspaceName: name
-                    )
+                // Activation remains serial and in config order: AppKit activation mutates
+                // one global frontmost-app state and is not safe to race. Window readiness
+                // is a separate concern, though, so one cold app must not keep a ready
+                // sibling from having its saved layout restored.
+                let activationRequests = target.apps.map { app in
+                    EDNInstrumentation.measure("activate.\(app.bundleId)") {
+                        windowManager.beginActivation(bundleID: app.bundleId)
+                    }
                 }
-                guard target.apps.isEmpty || finalResults.contains(where: \.appWasPresented) else {
-                    throw EngineError.workspaceActivationFailed(name)
-                }
+                var results = [SwitchResult?](repeating: nil, count: target.apps.count)
+                var activationResults = [AppActivationResult?](repeating: nil, count: target.apps.count)
+                var pendingHandles: [Int: PendingAppActivation] = [:]
+                var pendingWindowIndices: [Int] = []
+                var startedColdLaunch = false
 
-                // Capture the outgoing workspace's non-shared apps now: the target has
-                // already been presented, so this no longer sits in front of what the user
-                // is waiting to see, but it must still happen before the hide loop below --
-                // these apps need to be read while still visible in their pre-switch state.
-                if let deferred = deferredOutgoingSnapshot {
-                    _ = EDNInstrumentation.measure("snapshot.outgoing.\(deferred.workspace.name)") {
-                        snapshotLoadedState(deferred.workspace, apps: deferred.apps, state: &state)
+                for (index, request) in activationRequests.enumerated() {
+                    switch request {
+                    case .completed(let result): activationResults[index] = result
+                    case .pending(let handle):
+                        pendingHandles[index] = handle
+                        startedColdLaunch = true
                     }
                 }
 
-                // Only hide the old workspace after at least part of the target is actually
-                // available. A broken bundle id must not leave the user staring at an empty desktop.
+                for (index, app) in target.apps.enumerated() {
+                    let desiredFrames = desiredFramesByApp[index]
+                    guard !desiredFrames.isEmpty else {
+                        if let activation = activationResults[index] {
+                            results[index] = SwitchResult(bundleId: app.bundleId, activation: activation, applies: [])
+                        }
+                        continue
+                    }
+
+                    let available = EDNInstrumentation.measure("windows.ready.\(app.bundleId)") {
+                        windowManager.windows(forBundleID: app.bundleId)
+                    }
+                    let snapshots = materialize(available)
+                    let hasReadyWindow = standardWindowsIncludingMinimized(snapshots).isEmpty == false
+                    if hasReadyWindow {
+                        let activation = activationResults[index] ?? .launched
+                        activationResults[index] = activation
+                        pendingHandles[index] = nil
+                        results[index] = replayApp(
+                            app,
+                            snapshots: snapshots,
+                            desiredFrames: desiredFrames,
+                            activation: activation,
+                            workspaceName: name
+                        )
+                    } else if activationResults[index]?.succeeded == true || pendingHandles[index] != nil {
+                        pendingWindowIndices.append(index)
+                    } else {
+                        let activation = activationResults[index] ?? .launchTimedOut
+                        results[index] = replayApp(
+                            app,
+                            snapshots: snapshots,
+                            desiredFrames: desiredFrames,
+                            activation: activation,
+                            workspaceName: name
+                        )
+                    }
+                }
+
                 let targetBundleIds = Set(target.apps.map(\.bundleId))
                 let otherBundleIds = config.workspaces
                     .filter { $0.name != name }
                     .flatMap { $0.apps.map(\.bundleId) }
                 let bundleIdsToHide = Array(Set(otherBundleIds).subtracting(targetBundleIds)).sorted()
-                // Still one call to `hide()` per app, still fully sequential -- just a
-                // single shared-deadline poll for whichever ones didn't hide immediately,
-                // instead of each paying its own up-to-0.4s wait back-to-back.
-                let hideResults = EDNInstrumentation.measure("hide.batch") {
-                    windowManager.hide(bundleIDs: bundleIdsToHide)
-                }
-                for bundleId in bundleIdsToHide {
-                    if hideResults[bundleId]?.succeeded != true {
+                var didLeaveOutgoingWorkspace = false
+                func leaveOutgoingWorkspace() {
+                    guard !didLeaveOutgoingWorkspace else { return }
+                    // Non-shared geometry remains untouched until this point, so it can
+                    // be captured after a ready target appears but before the old apps hide.
+                    if let deferred = deferredOutgoingSnapshot {
+                        _ = EDNInstrumentation.measure("snapshot.outgoing.\(deferred.workspace.name)") {
+                            snapshotLoadedState(deferred.workspace, apps: deferred.apps, state: &state)
+                        }
+                    }
+                    let hideResults = EDNInstrumentation.measure("hide.batch") {
+                        windowManager.hide(bundleIDs: bundleIdsToHide)
+                    }
+                    for bundleId in bundleIdsToHide where hideResults[bundleId]?.succeeded != true {
                         warn("\(bundleId) refused to hide while switching to '\(name)'")
+                    }
+                    didLeaveOutgoingWorkspace = true
+                }
+
+                // If any target is already present, reveal the context immediately and
+                // spend the cold-launch wait afterward. Otherwise keep the old workspace
+                // visible until at least one target proves presentable.
+                if target.apps.isEmpty || results.compactMap({ $0 }).contains(where: \.appWasPresented) {
+                    leaveOutgoingWorkspace()
+                }
+
+                // Revisit only apps that were not AX-ready during the immediate pass.
+                // Every cold app shares one bounded wait instead of multiplying a five-
+                // second timeout by the number of apps in the workspace.
+                let pendingDeadline = Date().addingTimeInterval(5)
+                if !pendingWindowIndices.isEmpty {
+                    let pendingBundleIDs = pendingWindowIndices.map { target.apps[$0].bundleId }
+                    let lateWindows = EDNInstrumentation.measure("windows.pending") {
+                        windowManager.waitForWindows(
+                            bundleIDs: pendingBundleIDs,
+                            timeout: max(0, pendingDeadline.timeIntervalSinceNow)
+                        )
+                    }
+                    for index in pendingWindowIndices {
+                        let app = target.apps[index]
+                        let available = lateWindows[app.bundleId] ?? []
+                        let activation: AppActivationResult
+                        if available.isEmpty, let handle = pendingHandles[index] {
+                            activation = handle.resolve(timeout: max(0, pendingDeadline.timeIntervalSinceNow))
+                        } else {
+                            activation = activationResults[index] ?? .launched
+                        }
+                        activationResults[index] = activation
+                        pendingHandles[index] = nil
+                        results[index] = replayApp(
+                            app,
+                            windows: available,
+                            desiredFrames: desiredFramesByApp[index],
+                            activation: activation,
+                            workspaceName: name
+                        )
+                    }
+                }
+
+                // Apps with no saved frame still need their asynchronous launch result,
+                // but they never enter the AX-window polling path.
+                for index in pendingHandles.keys.sorted() {
+                    guard let handle = pendingHandles[index] else { continue }
+                    let activation = handle.resolve(timeout: max(0, pendingDeadline.timeIntervalSinceNow))
+                    activationResults[index] = activation
+                    results[index] = SwitchResult(
+                        bundleId: target.apps[index].bundleId,
+                        activation: activation,
+                        applies: []
+                    )
+                }
+
+                let finalResults = results.compactMap { $0 }
+                guard target.apps.isEmpty || finalResults.contains(where: \.appWasPresented) else {
+                    throw EngineError.workspaceActivationFailed(name)
+                }
+                leaveOutgoingWorkspace()
+
+                // A newly launched app may make itself frontmost when its first window
+                // appears. Restore the explicit config-order focus policy once, after all
+                // cold launches settle. The all-running hot path pays no extra call.
+                if startedColdLaunch, target.apps.count > 1,
+                   let lastPresented = target.apps.indices.last(where: { results[$0]?.appWasPresented == true }) {
+                    _ = EDNInstrumentation.measure("focus.final.\(target.apps[lastPresented].bundleId)") {
+                        windowManager.activate(bundleID: target.apps[lastPresented].bundleId, timeout: 1)
                     }
                 }
 
@@ -430,9 +542,41 @@ public final class WorkspaceEngine {
                 ? windowManager.waitForWindow(bundleID: app.bundleId, timeout: 5)
                 : windowManager.windows(forBundleID: app.bundleId)
         }
+        return replayApp(
+            app,
+            windows: availableWindows,
+            desiredFrames: desiredFrames,
+            activation: activation,
+            workspaceName: workspaceName
+        )
+    }
+
+    private func replayApp(
+        _ app: AppConfig,
+        windows: [any ManagedWindow],
+        desiredFrames: [Frame],
+        activation: AppActivationResult,
+        workspaceName: String
+    ) -> SwitchResult {
+        replayApp(
+            app,
+            snapshots: materialize(windows),
+            desiredFrames: desiredFrames,
+            activation: activation,
+            workspaceName: workspaceName
+        )
+    }
+
+    private func replayApp(
+        _ app: AppConfig,
+        snapshots: [WindowSnapshot],
+        desiredFrames: [Frame],
+        activation: AppActivationResult,
+        workspaceName: String
+    ) -> SwitchResult {
         // A minimized saved window is recoverable, not missing. Include it in count
         // matching, then restore only windows participating in the complete saved set.
-        let windows = standardWindowsIncludingMinimized(materialize(availableWindows))
+        let windows = standardWindowsIncludingMinimized(snapshots)
         traceWindowMatch(
             phase: "replay",
             workspace: workspaceName,

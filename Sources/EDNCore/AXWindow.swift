@@ -69,6 +69,38 @@ public enum AppActivationResult: Equatable {
     }
 }
 
+/// A launch that has been initiated without making the next workspace app wait for
+/// Launch Services. Resolution remains bounded and happens later in the switch.
+public final class PendingAppActivation {
+    private let lock = NSLock()
+    private var resolved: AppActivationResult?
+    private let resolveImpl: (TimeInterval) -> AppActivationResult
+
+    public init(resolve: @escaping (TimeInterval) -> AppActivationResult) {
+        resolveImpl = resolve
+    }
+
+    public func resolve(timeout: TimeInterval) -> AppActivationResult {
+        lock.lock()
+        if let resolved {
+            lock.unlock()
+            return resolved
+        }
+        lock.unlock()
+
+        let result = resolveImpl(max(0, timeout))
+        lock.lock()
+        resolved = result
+        lock.unlock()
+        return result
+    }
+}
+
+public enum AppActivationRequest {
+    case completed(AppActivationResult)
+    case pending(PendingAppActivation)
+}
+
 public enum AppHideResult: Equatable {
     case hidden
     case alreadyHidden
@@ -222,9 +254,11 @@ public protocol WindowManaging {
     func beginSwitch()
     func windows(forBundleID bundleID: String) -> [any ManagedWindow]
     func waitForWindow(bundleID: String, timeout: TimeInterval) -> [any ManagedWindow]
+    func waitForWindows(bundleIDs: [String], timeout: TimeInterval) -> [String: [any ManagedWindow]]
     func hide(bundleID: String) -> AppHideResult
     func hide(bundleIDs: [String]) -> [String: AppHideResult]
     func activate(bundleID: String, timeout: TimeInterval) -> AppActivationResult
+    func beginActivation(bundleID: String) -> AppActivationRequest
 }
 
 public extension WindowManaging {
@@ -234,6 +268,22 @@ public extension WindowManaging {
     /// sequentially, still single-threaded -- just without the shared poll deadline.
     func hide(bundleIDs: [String]) -> [String: AppHideResult] {
         Dictionary(uniqueKeysWithValues: bundleIDs.map { ($0, hide(bundleID: $0)) })
+    }
+
+    /// Default fallback for integrations and test doubles. The system implementation
+    /// polls all pending apps together so several cold launches share one deadline.
+    func waitForWindows(bundleIDs: [String], timeout: TimeInterval) -> [String: [any ManagedWindow]] {
+        let deadline = Date().addingTimeInterval(timeout)
+        return Dictionary(uniqueKeysWithValues: bundleIDs.map { bundleID in
+            let remaining = max(0, deadline.timeIntervalSinceNow)
+            return (bundleID, waitForWindow(bundleID: bundleID, timeout: remaining))
+        })
+    }
+
+    /// Existing conformers retain their blocking activation behavior. The system
+    /// manager overrides this to hand cold launches back immediately.
+    func beginActivation(bundleID: String) -> AppActivationRequest {
+        .completed(activate(bundleID: bundleID, timeout: 5))
     }
 }
 
@@ -252,6 +302,10 @@ public struct SystemWindowManager: WindowManaging {
     public func waitForWindow(bundleID: String, timeout: TimeInterval) -> [any ManagedWindow] {
         AXWindowManager.waitForWindow(bundleID: bundleID, timeout: timeout, applications: applications).map { $0 as any ManagedWindow }
     }
+    public func waitForWindows(bundleIDs: [String], timeout: TimeInterval) -> [String: [any ManagedWindow]] {
+        AXWindowManager.waitForWindows(bundleIDs: bundleIDs, timeout: timeout, applications: applications)
+            .mapValues { $0.map { $0 as any ManagedWindow } }
+    }
     public func hide(bundleID: String) -> AppHideResult {
         AXWindowManager.hide(bundleID: bundleID, applications: applications)
     }
@@ -260,6 +314,9 @@ public struct SystemWindowManager: WindowManaging {
     }
     public func activate(bundleID: String, timeout: TimeInterval) -> AppActivationResult {
         AXWindowManager.activate(bundleID: bundleID, timeout: timeout, applications: applications)
+    }
+    public func beginActivation(bundleID: String) -> AppActivationRequest {
+        AXWindowManager.beginActivation(bundleID: bundleID, applications: applications)
     }
 }
 
@@ -271,6 +328,7 @@ private final class RunningApplicationIndex {
 
     private let lock = NSLock()
     private var applicationsByBundleID: [String: NSRunningApplication] = [:]
+    private var pendingActivationsByBundleID: [String: PendingAppActivation] = [:]
     private var lastRefresh: Date = .distantPast
 
     init() {
@@ -316,6 +374,25 @@ private final class RunningApplicationIndex {
     func set(_ application: NSRunningApplication, bundleID: String) {
         lock.lock()
         applicationsByBundleID[bundleID] = application
+        pendingActivationsByBundleID[bundleID] = nil
+        lock.unlock()
+    }
+
+    func pendingActivation(bundleID: String) -> PendingAppActivation? {
+        lock.lock()
+        defer { lock.unlock() }
+        return pendingActivationsByBundleID[bundleID]
+    }
+
+    func setPendingActivation(_ activation: PendingAppActivation, bundleID: String) {
+        lock.lock()
+        pendingActivationsByBundleID[bundleID] = activation
+        lock.unlock()
+    }
+
+    func clearPendingActivation(bundleID: String) {
+        lock.lock()
+        pendingActivationsByBundleID[bundleID] = nil
         lock.unlock()
     }
 }
@@ -488,6 +565,56 @@ public enum AXWindowManager {
         activate(bundleID: bundleID, timeout: timeout, applications: nil)
     }
 
+    fileprivate static func beginActivation(
+        bundleID: String,
+        applications: RunningApplicationIndex?
+    ) -> AppActivationRequest {
+        if let app = applications?.application(bundleID: bundleID)
+            ?? (applications == nil ? NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID }) : nil) {
+            let unhidden = app.unhide()
+            let activated = app.activate()
+            let result: AppActivationResult = (unhidden || activated || !app.isHidden)
+                ? .activated
+                : .failed("application refused activation")
+            return .completed(result)
+        }
+        if let pending = applications?.pendingActivation(bundleID: bundleID) {
+            return .pending(pending)
+        }
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+            return .completed(.applicationNotFound)
+        }
+
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        let semaphore = DispatchSemaphore(value: 0)
+        let launchResult = ApplicationLaunchResult()
+        let pending = PendingAppActivation { timeout in
+            guard semaphore.wait(timeout: .now() + timeout) == .success else {
+                applications?.clearPendingActivation(bundleID: bundleID)
+                return .launchTimedOut
+            }
+            switch launchResult.get() {
+            case .success: return .launched
+            case .failure(let error):
+                return .failed("application launch failed: \(error.localizedDescription)")
+            case nil:
+                return .failed("application launch completed without a result")
+            }
+        }
+        applications?.setPendingActivation(pending, bundleID: bundleID)
+        NSWorkspace.shared.openApplication(at: url, configuration: config) { application, error in
+            launchResult.set(application: application, error: error)
+            if let application {
+                applications?.set(application, bundleID: bundleID)
+            } else {
+                applications?.clearPendingActivation(bundleID: bundleID)
+            }
+            semaphore.signal()
+        }
+        return .pending(pending)
+    }
+
     fileprivate static func activate(bundleID: String, timeout: TimeInterval = 5, applications: RunningApplicationIndex?) -> AppActivationResult {
         if let app = applications?.application(bundleID: bundleID)
             ?? (applications == nil ? NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID }) : nil) {
@@ -528,17 +655,44 @@ public enum AXWindowManager {
     }
 
     fileprivate static func waitForWindow(bundleID: String, timeout: TimeInterval = 5, applications: RunningApplicationIndex?) -> [AXWindow] {
+        waitForWindows(bundleIDs: [bundleID], timeout: timeout, applications: applications)[bundleID] ?? []
+    }
+
+    /// Polls several cold apps together against one deadline. A window is ready only
+    /// once AX has published a standard window with usable geometry; a bare, partially
+    /// initialized element is not enough to make an honest layout decision.
+    fileprivate static func waitForWindows(
+        bundleIDs: [String],
+        timeout: TimeInterval,
+        applications: RunningApplicationIndex?
+    ) -> [String: [AXWindow]] {
         let deadline = Date().addingTimeInterval(timeout)
         var pollInterval: TimeInterval = 0.01
-        while Date() < deadline {
-            let windows = self.windows(forBundleID: bundleID, applications: applications)
-            if !windows.isEmpty { return windows }
+        var pending = Array(Set(bundleIDs)).sorted()
+        var results: [String: [AXWindow]] = [:]
+
+        while !pending.isEmpty, Date() < deadline {
+            pending.removeAll { bundleID in
+                let windows = self.windows(forBundleID: bundleID, applications: applications)
+                let isReady = windows.contains {
+                    $0.subrole == (kAXStandardWindowSubrole as String) && $0.frame != nil
+                }
+                guard isReady else { return false }
+                results[bundleID] = windows
+                return true
+            }
+            if pending.isEmpty { break }
             // Newly launched apps often publish their first AX window quickly. Poll
             // eagerly at first, then back off to the previous 100ms cadence so a slow
             // launch does not spin needlessly for the full timeout.
             Thread.sleep(forTimeInterval: pollInterval)
             pollInterval = min(pollInterval * 2, 0.1)
         }
-        return []
+
+        for bundleID in pending {
+            // Preserve the final observation for accurate mismatch reporting.
+            results[bundleID] = self.windows(forBundleID: bundleID, applications: applications)
+        }
+        return results
     }
 }

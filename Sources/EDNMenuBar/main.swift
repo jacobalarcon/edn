@@ -26,6 +26,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var focusSettings: FocusSettingsWindowController?
     private var cachedInstalledApplications: [InstalledApplication]?
     private var lastSwitchIssues: [(workspace: String, bundleId: String, issue: SwitchIssue)] = []
+    /// Main-thread UI reads this cache instead of waiting on the cross-process state
+    /// lock while a cold workspace switch is still in flight.
+    private var cachedActiveWorkspace: String?
     private lazy var switchCoordinator = WorkspaceSwitchCoordinator(queue: switchQueue) { [weak self] name in
         self?.switchImmediately(to: name)
     }
@@ -59,6 +62,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             object: nil
         )
 
+        cachedActiveWorkspace = try? WorkspaceStateStore().read().activeWorkspace
         reloadHotkeysIfNeeded(force: true)
         refreshStatusTitle()
 
@@ -79,6 +83,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         workspaceIndicator.isMenuHighlighted = true
         reloadHotkeysIfNeeded()
         rebuildMenu(menu)
+        refreshActiveWorkspaceCache(rebuilding: menu)
     }
 
     func menuDidClose(_ menu: NSMenu) {
@@ -104,7 +109,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         menu.removeAllItems()
         do {
             let config = try Config.load()
-            let active = try WorkspaceStateStore().read().activeWorkspace
+            let active = cachedActiveWorkspace
             for workspace in config.workspaces.sorted(by: { $0.number < $1.number }) {
                 let item = NSMenuItem(
                     title: "\(workspace.number)  \(workspace.name)",
@@ -270,6 +275,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             }
             DispatchQueue.main.async { [weak self] in
                 self?.logger.debug("Switch completed: \(name, privacy: .public)")
+                self?.cachedActiveWorkspace = name
                 self?.lastSwitchIssues = results.compactMap { result in
                     result.issue.map { (name, result.bundleId, $0) }
                 }
@@ -389,6 +395,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     func managerDidMutateConfiguration() {
         reloadHotkeysIfNeeded(force: true)
         refreshStatusTitle()
+        refreshActiveWorkspaceCache()
     }
 
     func managerRequestsActivation(of workspaceName: String) {
@@ -524,7 +531,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private func refreshStatusTitle() {
         do {
             let config = try Config.load()
-            let active = try WorkspaceStateStore().read().activeWorkspace
+            let active = cachedActiveWorkspace
             let needsAccessibility = !AXWindowManager.isTrusted
             workspaceIndicator.update(
                 workspaces: config.workspaces,
@@ -549,6 +556,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             workspaceIndicator.update(workspaces: [], activeWorkspace: nil, hasWarning: true)
             statusItem.length = workspaceIndicator.intrinsicContentSize.width
             statusItem.button?.toolTip = "EDN configuration error"
+        }
+    }
+
+    private func refreshActiveWorkspaceCache(rebuilding menu: NSMenu? = nil) {
+        switchQueue.async { [weak self, weak menu] in
+            let active = try? WorkspaceStateStore().read().activeWorkspace
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.cachedActiveWorkspace = active
+                self.refreshStatusTitle()
+                if let menu, self.statusItem.menu === menu {
+                    self.rebuildMenu(menu)
+                }
+            }
         }
     }
 
@@ -637,8 +658,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 let results = try engine.restoreLaunchedApplication(bundleID: bundleID)
                 guard !results.isEmpty else { return }
                 self.logger.info("Restored launched app in active workspace: \(bundleID, privacy: .public)")
+                let active = try? WorkspaceStateStore().read().activeWorkspace
                 DispatchQueue.main.async { [weak self] in
-                    guard let self, let active = try? WorkspaceStateStore().read().activeWorkspace else { return }
+                    guard let self, let active else { return }
+                    self.cachedActiveWorkspace = active
                     self.lastSwitchIssues = results.compactMap { result in
                         result.issue.map { (active, result.bundleId, $0) }
                     }
