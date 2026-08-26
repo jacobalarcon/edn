@@ -296,7 +296,7 @@ struct WorkspaceAuthoringTests {
 
     @Test("A config with gaps or shortcut-matched numbers self-heals to contiguous positions on the next write")
     func legacyGappedNumbersSelfHealOnWrite() throws {
-        // Reproduces Jacob's real config: workspaces numbered to match their hotkeys
+        // Reproduces a legacy config with workspaces numbered to match their hotkeys
         // (1, 2, 5) from before position and shortcut were separated, rather than
         // reflecting row order.
         let fixture = try AuthoringFixture()

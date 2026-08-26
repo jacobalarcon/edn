@@ -52,7 +52,7 @@ struct DaemonErrorResponse: Encodable { let event: String; let workspace: String
 
 func printUsage() {
     print("""
-    edn - instant, config-driven workspaces with remembered window layouts for macOS
+    edn - virtual macOS workspaces that put your windows back where you left them
 
     Usage:
       edn init [--json]            Create an empty config at ~/.config/edn/config.json

@@ -1,16 +1,16 @@
 # EDN
 
-[![CI](https://github.com/jacobalarcon/edn/actions/workflows/ci.yml/badge.svg)](https://github.com/jacobalarcon/edn/actions/workflows/ci.yml)
+**Virtual workspaces for macOS that put your windows back where you left them.**
 
-EDN (pronounced “Eden”) is a fast, config-driven workspace manager for macOS. You choose which apps belong to a workspace, arrange their windows yourself, and EDN remembers and replays that layout when you return.
+Choose the apps, arrange the windows, and give the workspace a shortcut. EDN brings it back instantly, with no Mission Control animation.
 
-EDN uses app hiding and showing rather than Mission Control Spaces, so switching is immediate and animation-free. It does not calculate layouts, silently assign apps, or isolate individual windows of the same app.
-
-Optional global shortcuts can move focus through the running apps or live windows in the active workspace. They follow explicit app order, include every standard window, and never launch apps, move windows, or change workspaces.
+Workspaces are editable from the menu bar, plain JSON, or the `edn` CLI. EDN restores layouts; it does not calculate them for you.
 
 **[Download EDN for macOS →](https://github.com/jacobalarcon/edn/releases/download/v0.1.0-beta.3/EDN-0.1.0-beta.3.dmg)** · macOS 13+ · Apple Silicon and Intel
 
 **[Watch the 11-second demo →](docs/assets/demo.mp4)**
+
+EDN is pronounced “Eden.”
 
 ## The flow
 
@@ -86,6 +86,8 @@ With `--json`, successful results go to standard output. Failures are emitted as
 - Workspaces are app-level. For complete isolation between two windows of the same app, use macOS Spaces.
 
 ## Build from source
+
+[![CI](https://github.com/jacobalarcon/edn/actions/workflows/ci.yml/badge.svg)](https://github.com/jacobalarcon/edn/actions/workflows/ci.yml)
 
 EDN requires macOS 13 or newer and Swift 5.9 or newer. It has no third-party runtime dependencies.
 
