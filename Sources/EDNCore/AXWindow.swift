@@ -259,6 +259,7 @@ public protocol WindowManaging {
     func hide(bundleIDs: [String]) -> [String: AppHideResult]
     func activate(bundleID: String, timeout: TimeInterval) -> AppActivationResult
     func beginActivation(bundleID: String) -> AppActivationRequest
+    func requestReopen(bundleID: String) -> Bool
 }
 
 public extension WindowManaging {
@@ -285,6 +286,10 @@ public extension WindowManaging {
     func beginActivation(bundleID: String) -> AppActivationRequest {
         .completed(activate(bundleID: bundleID, timeout: 5))
     }
+
+    /// Test doubles and integrations that cannot ask an existing app to reopen simply
+    /// fall through to the ordinary bounded window wait.
+    func requestReopen(bundleID: String) -> Bool { false }
 }
 
 public struct SystemWindowManager: WindowManaging {
@@ -318,6 +323,9 @@ public struct SystemWindowManager: WindowManaging {
     public func beginActivation(bundleID: String) -> AppActivationRequest {
         AXWindowManager.beginActivation(bundleID: bundleID, applications: applications)
     }
+    public func requestReopen(bundleID: String) -> Bool {
+        AXWindowManager.requestReopen(bundleID: bundleID, applications: applications)
+    }
 }
 
 private final class RunningApplicationIndex {
@@ -328,6 +336,7 @@ private final class RunningApplicationIndex {
 
     private let lock = NSLock()
     private var applicationsByBundleID: [String: NSRunningApplication] = [:]
+    private var nonPresentableBundleIDs: Set<String> = []
     private var pendingActivationsByBundleID: [String: PendingAppActivation] = [:]
     private var lastRefresh: Date = .distantPast
 
@@ -336,8 +345,13 @@ private final class RunningApplicationIndex {
     }
 
     func refresh() {
+        var nonPresentable: Set<String> = []
         let applications = NSWorkspace.shared.runningApplications.reduce(into: [String: NSRunningApplication]()) { result, app in
             guard let bundleIdentifier = app.bundleIdentifier else { return }
+            guard AXWindowManager.isPresentableApplicationPolicy(app.activationPolicy) else {
+                nonPresentable.insert(bundleIdentifier)
+                return
+            }
             // Preserve the engine's previous first-match behavior when more than one
             // process reports the same bundle identifier.
             if result[bundleIdentifier] == nil {
@@ -346,8 +360,15 @@ private final class RunningApplicationIndex {
         }
         lock.lock()
         applicationsByBundleID = applications
+        nonPresentableBundleIDs = nonPresentable
         lastRefresh = Date()
         lock.unlock()
+    }
+
+    func hasNonPresentableApplication(bundleID: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return nonPresentableBundleIDs.contains(bundleID)
     }
 
     func application(bundleID: String) -> NSRunningApplication? {
@@ -423,6 +444,25 @@ public enum AXWindowManager {
 
     public static var isTrusted: Bool { AXIsProcessTrusted() }
 
+    /// Background/headless processes can report the same bundle identifier as their
+    /// foreground app while being incapable of presenting a window. They must never
+    /// satisfy workspace application lookup.
+    static func isPresentableApplicationPolicy(_ policy: NSApplication.ActivationPolicy) -> Bool {
+        policy != .prohibited
+    }
+
+    private static func runningApplication(bundleID: String) -> NSRunningApplication? {
+        NSWorkspace.shared.runningApplications.first {
+            $0.bundleIdentifier == bundleID && isPresentableApplicationPolicy($0.activationPolicy)
+        }
+    }
+
+    private static func hasNonPresentableApplication(bundleID: String) -> Bool {
+        NSWorkspace.shared.runningApplications.contains {
+            $0.bundleIdentifier == bundleID && !isPresentableApplicationPolicy($0.activationPolicy)
+        }
+    }
+
     /// Prompts the system Accessibility permission dialog if not already trusted.
     public static func requestPermission() {
         let opts = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
@@ -440,7 +480,7 @@ public enum AXWindowManager {
         // redundant full-process-table enumeration is needed here. The plain
         // `NSWorkspace` enumeration is only for callers with no index at all.
         guard let app = applications?.application(bundleID: bundleID)
-            ?? (applications == nil ? NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID }) : nil) else {
+            ?? (applications == nil ? runningApplication(bundleID: bundleID) : nil) else {
             return []
         }
         return windows(forPID: app.processIdentifier)
@@ -512,7 +552,7 @@ public enum AXWindowManager {
 
         for bundleID in bundleIDs {
             guard let app = applications?.application(bundleID: bundleID)
-                ?? (applications == nil ? NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID }) : nil) else {
+                ?? (applications == nil ? runningApplication(bundleID: bundleID) : nil) else {
                 results[bundleID] = .notRunning
                 continue
             }
@@ -570,7 +610,7 @@ public enum AXWindowManager {
         applications: RunningApplicationIndex?
     ) -> AppActivationRequest {
         if let app = applications?.application(bundleID: bundleID)
-            ?? (applications == nil ? NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID }) : nil) {
+            ?? (applications == nil ? runningApplication(bundleID: bundleID) : nil) {
             let unhidden = app.unhide()
             let activated = app.activate()
             let result: AppActivationResult = (unhidden || activated || !app.isHidden)
@@ -587,6 +627,8 @@ public enum AXWindowManager {
 
         let config = NSWorkspace.OpenConfiguration()
         config.activates = true
+        config.createsNewApplicationInstance = applications?.hasNonPresentableApplication(bundleID: bundleID)
+            ?? hasNonPresentableApplication(bundleID: bundleID)
         let semaphore = DispatchSemaphore(value: 0)
         let launchResult = ApplicationLaunchResult()
         let pending = PendingAppActivation { timeout in
@@ -617,7 +659,7 @@ public enum AXWindowManager {
 
     fileprivate static func activate(bundleID: String, timeout: TimeInterval = 5, applications: RunningApplicationIndex?) -> AppActivationResult {
         if let app = applications?.application(bundleID: bundleID)
-            ?? (applications == nil ? NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID }) : nil) {
+            ?? (applications == nil ? runningApplication(bundleID: bundleID) : nil) {
             let unhidden = app.unhide()
             let activated = app.activate()
             return (unhidden || activated || !app.isHidden)
@@ -629,6 +671,8 @@ public enum AXWindowManager {
         }
         let config = NSWorkspace.OpenConfiguration()
         config.activates = true
+        config.createsNewApplicationInstance = applications?.hasNonPresentableApplication(bundleID: bundleID)
+            ?? hasNonPresentableApplication(bundleID: bundleID)
 
         let sema = DispatchSemaphore(value: 0)
         let launchResult = ApplicationLaunchResult()
@@ -646,6 +690,26 @@ public enum AXWindowManager {
         case .failure(let error): return .failed("application launch failed: \(error.localizedDescription)")
         case nil: return .failed("application launch completed without a result")
         }
+    }
+
+    /// Sends normal Launch Services reopen semantics to the exact running GUI app.
+    /// This covers the valid macOS state where the process remains alive after its last
+    /// window closes. It does not synthesize input or create a second app instance.
+    fileprivate static func requestReopen(bundleID: String, applications: RunningApplicationIndex?) -> Bool {
+        guard let app = applications?.application(bundleID: bundleID)
+            ?? (applications == nil ? runningApplication(bundleID: bundleID) : nil),
+              let url = app.bundleURL else {
+            return false
+        }
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        config.createsNewApplicationInstance = false
+        NSWorkspace.shared.openApplication(at: url, configuration: config) { application, _ in
+            if let application {
+                applications?.set(application, bundleID: bundleID)
+            }
+        }
+        return true
     }
 
     /// Polls for at least one window to appear for the given bundle id, up to `timeout` seconds.

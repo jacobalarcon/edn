@@ -9,7 +9,10 @@ struct WorkspaceEngineTests {
     func successfulSwitchCommitsActiveWorkspace() throws {
         let fixture = try EngineFixture(activeWorkspace: "old")
         defer { fixture.remove() }
-        let windows = FakeWindowManager(activations: ["app.target": .activated])
+        let windows = FakeWindowManager(
+            activations: ["app.target": .activated],
+            windows: ["app.target": [FakeManagedWindow(frame: Frame(x: 0, y: 0, w: 800, h: 600))]]
+        )
         let engine = WorkspaceEngine(
             config: fixture.config,
             stateStore: fixture.store,
@@ -112,7 +115,10 @@ struct WorkspaceEngineTests {
             activeWorkspaceSince: Date()
         )
         defer { fixture.remove() }
-        let windows = FakeWindowManager(activations: ["app.target": .activated])
+        let windows = FakeWindowManager(
+            activations: ["app.target": .activated],
+            windows: ["app.target": [FakeManagedWindow(frame: Frame(x: 0, y: 0, w: 800, h: 600))]]
+        )
         let engine = WorkspaceEngine(
             config: fixture.config,
             stateStore: fixture.store,
@@ -131,7 +137,10 @@ struct WorkspaceEngineTests {
             activeWorkspaceSince: Date().addingTimeInterval(-1)
         )
         defer { fixture.remove() }
-        let windows = FakeWindowManager(activations: ["app.target": .activated])
+        let windows = FakeWindowManager(
+            activations: ["app.target": .activated],
+            windows: ["app.target": [FakeManagedWindow(frame: Frame(x: 0, y: 0, w: 800, h: 600))]]
+        )
         let engine = WorkspaceEngine(
             config: fixture.config,
             stateStore: fixture.store,
@@ -312,7 +321,10 @@ struct WorkspaceEngineTests {
         let replacement = Frame(x: 10, y: 10, w: 900, h: 700)
         let manager = FakeWindowManager(
             activations: ["app.target": .activated],
-            windows: ["app.old": [FakeManagedWindow(frame: replacement)]]
+            windows: [
+                "app.old": [FakeManagedWindow(frame: replacement)],
+                "app.target": [FakeManagedWindow(frame: Frame(x: 0, y: 0, w: 800, h: 600))]
+            ]
         )
         let engine = WorkspaceEngine(config: fixture.config, stateStore: fixture.store, windowManager: manager)
 
@@ -399,6 +411,7 @@ struct WorkspaceEngineTests {
         let newA = FakeManagedWindow(title: "new-a", frame: Frame(x: 0, y: 500, w: 500, h: 500))
         let newB = FakeManagedWindow(title: "new-b", frame: Frame(x: 510, y: 500, w: 500, h: 500))
         let newC = FakeManagedWindow(title: "new-c", frame: Frame(x: 1020, y: 500, w: 500, h: 500))
+        let shared = FakeManagedWindow(title: "shared", frame: Frame(x: 0, y: 0, w: 300, h: 300))
         let manager = FakeWindowManager(
             activations: [
                 "app.new-one": .activated,
@@ -410,7 +423,7 @@ struct WorkspaceEngineTests {
                 "app.old-two": [oldB],
                 "app.new-one": [newA, newB],
                 "app.new-two": [newC],
-                "app.shared": []
+                "app.shared": [shared]
             ]
         )
         let engine = WorkspaceEngine(
@@ -427,7 +440,7 @@ struct WorkspaceEngineTests {
         // "app.shared" belongs to both workspaces, so it must be captured first, before
         // the target's frames are applied. The non-shared apps ("app.old-one",
         // "app.old-two") are captured afterward, right before they're hidden.
-        #expect(manager.queriedBundleIDs == ["app.shared", "app.new-one", "app.new-two", "app.old-one", "app.old-two"])
+        #expect(manager.queriedBundleIDs == ["app.shared", "app.new-one", "app.new-two", "app.shared", "app.old-one", "app.old-two"])
         #expect(Set(manager.hiddenBundleIDs) == ["app.old-one", "app.old-two"])
         #expect(newA.appliedFrames == [Frame(x: 10, y: 10, w: 500, h: 500)])
         #expect(newB.appliedFrames == [Frame(x: 520, y: 10, w: 500, h: 500)])
@@ -437,6 +450,95 @@ struct WorkspaceEngineTests {
         #expect(newA.frameAccessCount == 1)
         #expect(newB.frameAccessCount == 1)
         #expect(newC.frameAccessCount == 1)
+    }
+
+    @Test("A running zero-window app is reopened once and receives its saved layout")
+    func runningZeroWindowAppIsReopened() throws {
+        let fixture = try EngineFixture(activeWorkspace: "old")
+        defer { fixture.remove() }
+        let desired = Frame(x: 20, y: 30, w: 900, h: 700)
+        try fixture.store.update { state in
+            state.setWindowFrames([desired], workspace: "target", key: "app.target")
+        }
+        let window = FakeManagedWindow(frame: Frame(x: 0, y: 0, w: 400, h: 300))
+        let manager = FakeWindowManager(
+            activations: ["app.target": .activated],
+            windows: ["app.target": [window]],
+            initiallyNotReady: ["app.target"]
+        )
+        let engine = WorkspaceEngine(config: fixture.config, stateStore: fixture.store, windowManager: manager)
+
+        let results = try engine.switchTo("target")
+
+        #expect(manager.reopenedBundleIDs == ["app.target"])
+        #expect(manager.waitedBatches == [["app.target"]])
+        #expect(window.appliedFrames == [desired])
+        #expect(results[0].appWasPresented)
+        #expect(try fixture.store.read().activeWorkspace == "target")
+    }
+
+    @Test("A frameless workspace member still has to produce a real window")
+    func framelessMemberIsReopenedAndVerified() throws {
+        let fixture = try EngineFixture(activeWorkspace: "old")
+        defer { fixture.remove() }
+        let manager = FakeWindowManager(
+            activations: ["app.target": .activated],
+            windows: ["app.target": [FakeManagedWindow(frame: Frame(x: 0, y: 0, w: 800, h: 600))]],
+            initiallyNotReady: ["app.target"]
+        )
+        let engine = WorkspaceEngine(config: fixture.config, stateStore: fixture.store, windowManager: manager)
+
+        let results = try engine.switchTo("target")
+
+        #expect(manager.reopenedBundleIDs == ["app.target"])
+        #expect(results[0].applies.isEmpty)
+        #expect(results[0].appWasPresented)
+        #expect(manager.hiddenBundleIDs == ["app.old"])
+    }
+
+    @Test("A minimized window is present and never triggers reopen")
+    func minimizedWindowDoesNotReopenApp() throws {
+        let fixture = try EngineFixture(activeWorkspace: "old")
+        defer { fixture.remove() }
+        let desired = Frame(x: 20, y: 30, w: 900, h: 700)
+        try fixture.store.update { state in
+            state.setWindowFrames([desired], workspace: "target", key: "app.target")
+        }
+        let minimized = FakeManagedWindow(frame: desired, isMinimized: true)
+        let manager = FakeWindowManager(
+            activations: ["app.target": .activated],
+            windows: ["app.target": [minimized]]
+        )
+        let engine = WorkspaceEngine(config: fixture.config, stateStore: fixture.store, windowManager: manager)
+
+        let results = try engine.switchTo("target")
+
+        #expect(manager.reopenedBundleIDs.isEmpty)
+        #expect(minimized.minimizedWrites == [false])
+        #expect(results[0].appWasPresented)
+    }
+
+    @Test("A failed reopen preserves the old workspace and hides nothing")
+    func failedReopenPreservesOldWorkspace() throws {
+        let fixture = try EngineFixture(activeWorkspace: "old")
+        defer { fixture.remove() }
+        let manager = FakeWindowManager(
+            activations: ["app.target": .activated],
+            windows: [:],
+            initiallyNotReady: ["app.target"],
+            reopenSucceeds: false
+        )
+        let engine = WorkspaceEngine(config: fixture.config, stateStore: fixture.store, windowManager: manager)
+
+        do {
+            _ = try engine.switchTo("target")
+            Issue.record("Expected activation failure")
+        } catch EngineError.workspaceActivationFailed("target") {}
+
+        #expect(manager.reopenedBundleIDs == ["app.target"])
+        #expect(manager.waitedBatches == [["app.target"]])
+        #expect(manager.hiddenBundleIDs.isEmpty)
+        #expect(try fixture.store.read().activeWorkspace == "old")
     }
 
     @Test("A cold app does not delay replaying a ready sibling")
@@ -471,6 +573,7 @@ struct WorkspaceEngineTests {
         let results = try engine.switchTo("target")
 
         #expect(results.map(\.bundleId) == ["app.slow", "app.ready"])
+        #expect(manager.reopenedBundleIDs.isEmpty)
         #expect(manager.activationBundleIDs == ["app.slow", "app.ready", "app.ready"])
         #expect(manager.waitedBatches == [["app.slow"]])
         guard let readyApply = events.events.firstIndex(of: "applyFrame:ready"),
@@ -624,9 +727,11 @@ private final class FakeWindowManager: WindowManaging {
     private let eventLog: EventLog?
     private let initiallyNotReady: Set<String>
     private let asynchronousLaunches: Set<String>
+    private let reopenSucceeds: Bool
     private(set) var beginSwitchCount = 0
     private(set) var hiddenBundleIDs: [String] = []
     private(set) var activationBundleIDs: [String] = []
+    private(set) var reopenedBundleIDs: [String] = []
     private(set) var queriedBundleIDs: [String] = []
     private(set) var waitedBundleIDs: [String] = []
     private(set) var waitedBatches: [[String]] = []
@@ -636,12 +741,14 @@ private final class FakeWindowManager: WindowManaging {
         windows: [String: [any ManagedWindow]] = [:],
         initiallyNotReady: Set<String> = [],
         asynchronousLaunches: Set<String> = [],
+        reopenSucceeds: Bool = true,
         eventLog: EventLog? = nil
     ) {
         self.activations = activations
         managedWindows = windows
         self.initiallyNotReady = initiallyNotReady
         self.asynchronousLaunches = asynchronousLaunches
+        self.reopenSucceeds = reopenSucceeds
         self.eventLog = eventLog
     }
 
@@ -683,6 +790,11 @@ private final class FakeWindowManager: WindowManaging {
             eventLog?.record("resolve:\(bundleID)")
             return activations[bundleID] ?? .launchTimedOut
         })
+    }
+    func requestReopen(bundleID: String) -> Bool {
+        reopenedBundleIDs.append(bundleID)
+        eventLog?.record("reopen:\(bundleID)")
+        return reopenSucceeds
     }
 }
 

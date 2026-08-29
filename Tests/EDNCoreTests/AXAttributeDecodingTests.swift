@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import Testing
 @testable import EDNCore
@@ -40,5 +41,16 @@ struct AXAttributeDecodingTests {
         #expect(AXWindow.unwrapPoint(sizeValue) == nil)
         #expect(AXWindow.unwrapSize("not an AXValue" as CFTypeRef) == nil)
         #expect(AXWindow.unwrapPoint(nil) == nil)
+    }
+
+    @Test("Foreground and accessory apps are presentable workspace members")
+    func presentableApplicationPolicies() {
+        #expect(AXWindowManager.isPresentableApplicationPolicy(.regular))
+        #expect(AXWindowManager.isPresentableApplicationPolicy(.accessory))
+    }
+
+    @Test("Headless and background processes cannot impersonate workspace apps")
+    func prohibitedApplicationPolicy() {
+        #expect(!AXWindowManager.isPresentableApplicationPolicy(.prohibited))
     }
 }

@@ -27,26 +27,29 @@ public struct SwitchResult {
     public let activation: AppActivationResult
     public let applies: [FrameApplyResult]
     public let issue: SwitchIssue?
+    private let observedWindow: Bool
 
     init(
         bundleId: String,
         activation: AppActivationResult,
         applies: [FrameApplyResult],
-        issue: SwitchIssue? = nil
+        issue: SwitchIssue? = nil,
+        observedWindow: Bool
     ) {
         self.bundleId = bundleId
         self.activation = activation
         self.applies = applies
         self.issue = issue
+        self.observedWindow = observedWindow
     }
 
     public var appWasPresented: Bool {
-        activation.succeeded || applies.contains(where: { $0.actual != nil })
+        observedWindow
     }
 
     public var summary: String {
-        if !activation.succeeded, !applies.contains(where: { $0.actual != nil }) {
-            return "\(bundleId): FAILED (\(activation.failureDescription ?? "application unavailable"))"
+        if !appWasPresented {
+            return "\(bundleId): FAILED (\(activation.failureDescription ?? "application produced no window"))"
         }
         guard !applies.isEmpty else { return "\(bundleId): ok (no saved layout)" }
         let matched = applies.filter(\.fullyMatched).count
@@ -383,13 +386,6 @@ public final class WorkspaceEngine {
 
                 for (index, app) in target.apps.enumerated() {
                     let desiredFrames = desiredFramesByApp[index]
-                    guard !desiredFrames.isEmpty else {
-                        if let activation = activationResults[index] {
-                            results[index] = SwitchResult(bundleId: app.bundleId, activation: activation, applies: [])
-                        }
-                        continue
-                    }
-
                     let available = EDNInstrumentation.measure("windows.ready.\(app.bundleId)") {
                         windowManager.windows(forBundleID: app.bundleId)
                     }
@@ -399,24 +395,46 @@ public final class WorkspaceEngine {
                         let activation = activationResults[index] ?? .launched
                         activationResults[index] = activation
                         pendingHandles[index] = nil
-                        results[index] = replayApp(
-                            app,
-                            snapshots: snapshots,
-                            desiredFrames: desiredFrames,
-                            activation: activation,
-                            workspaceName: name
-                        )
+                        results[index] = desiredFrames.isEmpty
+                            ? SwitchResult(
+                                bundleId: app.bundleId,
+                                activation: activation,
+                                applies: [],
+                                observedWindow: true
+                            )
+                            : replayApp(
+                                app,
+                                snapshots: snapshots,
+                                desiredFrames: desiredFrames,
+                                activation: activation,
+                                workspaceName: name
+                            )
                     } else if activationResults[index]?.succeeded == true || pendingHandles[index] != nil {
+                        // A running GUI app may validly outlive its last window. Plain
+                        // activation does not ask such an app to create another one, so
+                        // send normal Launch Services reopen semantics exactly once.
+                        if activationResults[index] == .activated {
+                            _ = EDNInstrumentation.measure("reopen.\(app.bundleId)") {
+                                windowManager.requestReopen(bundleID: app.bundleId)
+                            }
+                        }
                         pendingWindowIndices.append(index)
                     } else {
                         let activation = activationResults[index] ?? .launchTimedOut
-                        results[index] = replayApp(
-                            app,
-                            snapshots: snapshots,
-                            desiredFrames: desiredFrames,
-                            activation: activation,
-                            workspaceName: name
-                        )
+                        results[index] = desiredFrames.isEmpty
+                            ? SwitchResult(
+                                bundleId: app.bundleId,
+                                activation: activation,
+                                applies: [],
+                                observedWindow: false
+                            )
+                            : replayApp(
+                                app,
+                                snapshots: snapshots,
+                                desiredFrames: desiredFrames,
+                                activation: activation,
+                                workspaceName: name
+                            )
                     }
                 }
 
@@ -474,13 +492,24 @@ public final class WorkspaceEngine {
                         }
                         activationResults[index] = activation
                         pendingHandles[index] = nil
-                        results[index] = replayApp(
-                            app,
-                            windows: available,
-                            desiredFrames: desiredFramesByApp[index],
-                            activation: activation,
-                            workspaceName: name
-                        )
+                        let desiredFrames = desiredFramesByApp[index]
+                        if desiredFrames.isEmpty {
+                            let snapshots = materialize(available)
+                            results[index] = SwitchResult(
+                                bundleId: app.bundleId,
+                                activation: activation,
+                                applies: [],
+                                observedWindow: !standardWindowsIncludingMinimized(snapshots).isEmpty
+                            )
+                        } else {
+                            results[index] = replayApp(
+                                app,
+                                windows: available,
+                                desiredFrames: desiredFrames,
+                                activation: activation,
+                                workspaceName: name
+                            )
+                        }
                     }
                 }
 
@@ -493,7 +522,8 @@ public final class WorkspaceEngine {
                     results[index] = SwitchResult(
                         bundleId: target.apps[index].bundleId,
                         activation: activation,
-                        applies: []
+                        applies: [],
+                        observedWindow: false
                     )
                 }
 
@@ -531,7 +561,16 @@ public final class WorkspaceEngine {
             let activation = EDNInstrumentation.measure("activate.\(app.bundleId)") {
                 windowManager.activate(bundleID: app.bundleId, timeout: 5)
             }
-            return SwitchResult(bundleId: app.bundleId, activation: activation, applies: [])
+            let available = activation.succeeded
+                ? windowManager.waitForWindow(bundleID: app.bundleId, timeout: 5)
+                : windowManager.windows(forBundleID: app.bundleId)
+            let observed = !standardWindowsIncludingMinimized(materialize(available)).isEmpty
+            return SwitchResult(
+                bundleId: app.bundleId,
+                activation: activation,
+                applies: [],
+                observedWindow: observed
+            )
         }
 
         let activation = EDNInstrumentation.measure("activate.\(app.bundleId)") {
@@ -600,7 +639,8 @@ public final class WorkspaceEngine {
                     bundleId: app.bundleId,
                     activation: activation,
                     applies: failed,
-                    issue: .windowCountMismatch(expected: orderedFrames.count, actual: orderedWindows.count)
+                    issue: .windowCountMismatch(expected: orderedFrames.count, actual: orderedWindows.count),
+                    observedWindow: !windows.isEmpty
                 )
             }
             targets = zip(orderedWindows, orderedFrames).map { ($0.0, $0.1) }
@@ -610,6 +650,11 @@ public final class WorkspaceEngine {
                 window?.restoreAndSetFrameIfNeeded(frame) ?? FrameApplyResult(requested: frame, actual: nil)
             }
         }
-        return SwitchResult(bundleId: app.bundleId, activation: activation, applies: applies)
+        return SwitchResult(
+            bundleId: app.bundleId,
+            activation: activation,
+            applies: applies,
+            observedWindow: !windows.isEmpty
+        )
     }
 }
