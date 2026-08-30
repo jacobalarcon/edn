@@ -6,7 +6,7 @@ Choose the apps, arrange the windows, and give the workspace a shortcut. EDN bri
 
 Workspaces are editable from the menu bar, plain JSON, or the `edn` CLI. EDN restores layouts; it does not calculate them for you.
 
-**[Download EDN for macOS →](https://github.com/jacobalarcon/edn/releases/download/v0.1.0-beta.5/EDN-0.1.0-beta.5.dmg)** · macOS 13+ · Apple Silicon and Intel
+**[Download EDN for macOS →](https://github.com/jacobalarcon/edn/releases/download/v0.1.0-beta.6/EDN-0.1.0-beta.6.dmg)** · macOS 13+ · Apple Silicon and Intel
 
 **[Watch the 11-second demo →](docs/assets/demo.mp4)**
 
@@ -28,7 +28,7 @@ EDN is pronounced “Eden.”
 
 ## Install
 
-**[Download EDN for macOS (.dmg)](https://github.com/jacobalarcon/edn/releases/download/v0.1.0-beta.5/EDN-0.1.0-beta.5.dmg)**
+**[Download EDN for macOS (.dmg)](https://github.com/jacobalarcon/edn/releases/download/v0.1.0-beta.6/EDN-0.1.0-beta.6.dmg)**
 
 Requires macOS 13 or newer. The download is universal for Apple Silicon and Intel Macs.
 
