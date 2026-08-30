@@ -444,11 +444,13 @@ public enum AXWindowManager {
 
     public static var isTrusted: Bool { AXIsProcessTrusted() }
 
-    /// Background/headless processes can report the same bundle identifier as their
-    /// foreground app while being incapable of presenting a window. They must never
-    /// satisfy workspace application lookup.
+    /// Only foreground applications can satisfy workspace application lookup.
+    /// Accessory and headless processes can report the same bundle identifier as their
+    /// foreground app while being incapable of presenting a normal app window. Treating
+    /// either as the app would route activation/reopen requests into the helper and leave
+    /// EDN waiting for a window that can never appear.
     static func isPresentableApplicationPolicy(_ policy: NSApplication.ActivationPolicy) -> Bool {
-        policy != .prohibited
+        policy == .regular
     }
 
     private static func runningApplication(bundleID: String) -> NSRunningApplication? {

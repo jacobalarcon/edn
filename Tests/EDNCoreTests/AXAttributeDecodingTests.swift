@@ -43,14 +43,10 @@ struct AXAttributeDecodingTests {
         #expect(AXWindow.unwrapPoint(nil) == nil)
     }
 
-    @Test("Foreground and accessory apps are presentable workspace members")
+    @Test("Only foreground apps are presentable workspace members")
     func presentableApplicationPolicies() {
         #expect(AXWindowManager.isPresentableApplicationPolicy(.regular))
-        #expect(AXWindowManager.isPresentableApplicationPolicy(.accessory))
-    }
-
-    @Test("Headless and background processes cannot impersonate workspace apps")
-    func prohibitedApplicationPolicy() {
+        #expect(!AXWindowManager.isPresentableApplicationPolicy(.accessory))
         #expect(!AXWindowManager.isPresentableApplicationPolicy(.prohibited))
     }
 }
